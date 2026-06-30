@@ -1,0 +1,14 @@
+﻿__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# generated data
+14to209/
+14to209_noisy/
+generated*/
+resampled*/
+*.npy
+*.npz
+*.png
+*.pt
+*.safetensors

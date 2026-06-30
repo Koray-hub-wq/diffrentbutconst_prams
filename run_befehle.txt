@@ -1,0 +1,31 @@
+conda activate dynamix-data
+cd "C:\Users\koray\OneDrive\Dokumente\Studium\Master\Heidelberg\Master_Thesis\generate_trainingdata\diffrentbutconst_prams"
+
+# trajektoriensimulation 
+python generate_constant_parameter_trajectories.py ^
+  --output-dir 14to209_noisy\trajectories ^
+  --regime-filter halvorsen_a_chaotic_to_periodic ^
+  --phi-values -1 -0.5 0 0.5 1 ^
+  --trajectories-per-phi 8 ^
+  --noise-std-fraction 0.05
+
+# resampling
+python resample_constant_parameter_windows.py ^
+  --input-dir 14to209_noisy\trajectories ^
+  --output-dir 14to209_noisy\windows ^
+  --context-len 500 ^
+  --seq-len 650 ^
+  --overlap-len 50 ^
+  --windows-per-trajectory 16
+
+#serverdatei
+source .venv/bin/activate
+python constant_parameter_stochastic_median_slides_server.py \
+  --repo-root DynaMix-python-b-tipping \
+  --data-dir training_data/single_halvorsen_constparams/14to209_noisy \
+  --with-phi-run DynaMix-python-b-tipping/results/single_halvorsen_constparams/14to209_noisy-with-phi \
+  --no-phi-run DynaMix-python-b-tipping/results/single_halvorsen_constparams/14to209_noisy-no-phi \
+  --output-dir DynaMix-python-b-tipping/results/single_halvorsen_constparams/14to209_noisy/median_stochastic_slides \
+  --device cuda \
+  --gpu-id 0 \
+  --torch-threads 4
