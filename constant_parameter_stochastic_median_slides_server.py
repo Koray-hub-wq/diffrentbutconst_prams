@@ -41,7 +41,7 @@ except ImportError:
 
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEFAULT_ROLLOUTS = 50
-DEFAULT_PLOT_POINTS = 10000
+DEFAULT_TIMESERIES_PREDICTION_STEPS = 1000
 N_BINS = 30
 PS_SMOOTHING = 20
 MASE_STEPS = 10
@@ -107,11 +107,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--plot-points",
         type=int,
-        default=DEFAULT_PLOT_POINTS,
+        default=None,
         help=(
-            "Maximum plotted points per test window. The full time span is shown; "
-            "values above the window length plot every step."
+            "Maximum plotted prediction points for the 3D plots. Defaults to the "
+            "full prediction horizon."
         ),
+    )
+    parser.add_argument(
+        "--timeseries-prediction-steps",
+        type=int,
+        default=DEFAULT_TIMESERIES_PREDICTION_STEPS,
+        help="Number of forecast steps after the context shown in the dimension plots.",
     )
     parser.add_argument(
         "--phi-round-decimals",
@@ -566,6 +572,7 @@ def plot_phi_slide(
     no_selected: dict[str, Any],
     phi_selected: dict[str, Any],
     plot_points: int,
+    timeseries_prediction_steps: int,
 ) -> None:
     phi_truth, phi_pred = full_prediction(
         test, phi_selected["prediction"], phi_selected["series_idx"], context_steps
@@ -574,12 +581,20 @@ def plot_phi_slide(
         test, no_selected["prediction"], no_selected["series_idx"], context_steps
     )
 
-    plot_idx = make_plot_indices(test.shape[0], plot_points)
-    t = plot_idx
-    phi_truth_plot = phi_truth[plot_idx]
-    phi_pred_plot = phi_pred[plot_idx]
-    no_truth_plot = no_truth[plot_idx]
-    no_pred_plot = no_pred[plot_idx]
+    horizon = test.shape[0] - context_steps
+    plot_points_3d = horizon if plot_points is None else plot_points
+    plot_idx_3d = context_steps + make_plot_indices(horizon, plot_points_3d)
+    ts_end = min(test.shape[0], context_steps + timeseries_prediction_steps)
+    plot_idx_ts = np.arange(context_steps, ts_end)
+    t = plot_idx_ts - context_steps
+    phi_truth_3d = phi_truth[plot_idx_3d]
+    phi_pred_3d = phi_pred[plot_idx_3d]
+    no_truth_3d = no_truth[plot_idx_3d]
+    no_pred_3d = no_pred[plot_idx_3d]
+    phi_truth_ts = phi_truth[plot_idx_ts]
+    phi_pred_ts = phi_pred[plot_idx_ts]
+    no_truth_ts = no_truth[plot_idx_ts]
+    no_pred_ts = no_pred[plot_idx_ts]
 
     fig = plt.figure(figsize=(22, 10))
     gs = fig.add_gridspec(3, 4, width_ratios=[1.15, 1.15, 1.1, 1.1])
@@ -590,21 +605,21 @@ def plot_phi_slide(
 
     plot_one_side_3d(
         ax_phi_3d,
-        phi_truth_plot,
-        phi_pred_plot,
+        phi_truth_3d,
+        phi_pred_3d,
         f"with phi | test {phi_selected['series_idx']}",
     )
     plot_one_side_3d(
         ax_no_3d,
-        no_truth_plot,
-        no_pred_plot,
+        no_truth_3d,
+        no_pred_3d,
         f"no phi | test {no_selected['series_idx']}",
     )
 
     for dim in range(3):
         for ax, truth, pred, title in (
-            (ts_phi[dim], phi_truth_plot, phi_pred_plot, "with phi"),
-            (ts_no[dim], no_truth_plot, no_pred_plot, "no phi"),
+            (ts_phi[dim], phi_truth_ts, phi_pred_ts, "with phi"),
+            (ts_no[dim], no_truth_ts, no_pred_ts, "no phi"),
         ):
             ax.plot(
                 t,
@@ -620,15 +635,14 @@ def plot_phi_slide(
                 lw=1.4,
                 label="DynaMix" if dim == 0 else None,
             )
-            ax.axvline(context_steps, color="0.25", ls="--", lw=0.8, alpha=0.65)
-            ax.set_xlim(0, test.shape[0] - 1)
+            ax.set_xlim(0, max(1, len(t) - 1))
             ax.set_ylabel(f"Dim {dim + 1}")
             ax.grid(alpha=0.25)
             if dim == 0:
                 ax.set_title(title)
                 ax.legend()
             if dim == 2:
-                ax.set_xlabel("Test-window time")
+                ax.set_xlabel("Forecast time")
 
     improvement = percent_improvement(
         no_selected["metrics"][metric], phi_selected["metrics"][metric]
@@ -758,6 +772,7 @@ def main() -> None:
             no_selected,
             phi_selected,
             args.plot_points,
+            args.timeseries_prediction_steps,
         )
 
         summary["phi_values"][str(phi_value)] = {
