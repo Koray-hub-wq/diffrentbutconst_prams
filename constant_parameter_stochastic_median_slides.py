@@ -397,7 +397,7 @@ def select_group_median(
             }
         )
     ordered = sorted(per_series, key=lambda item: item["selection_score"])
-    selected = ordered[len(ordered) // 2]
+    selected = dict(ordered[len(ordered) // 2])
     selected["prediction"] = preds[selected["rollout_idx"]][:, selected["series_idx"], :]
     selected["per_series"] = per_series
     return selected
@@ -578,8 +578,14 @@ def plot_phi_slide(
 
 
 def strip_predictions(selection: dict[str, Any]) -> dict[str, Any]:
+    seen: set[int] = set()
+
     def to_jsonable(value):
         if isinstance(value, dict):
+            value_id = id(value)
+            if value_id in seen:
+                return "<recursive>"
+            seen.add(value_id)
             return {
                 key: to_jsonable(item)
                 for key, item in value.items()
