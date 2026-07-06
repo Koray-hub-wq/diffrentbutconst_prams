@@ -125,6 +125,18 @@ def parse_args() -> argparse.Namespace:
         default=8,
         help="Decimals used to group constant phi values.",
     )
+    parser.add_argument(
+        "--slide-modes",
+        nargs="+",
+        choices=("all", "own", "with_phi_anchor", "no_phi_anchor"),
+        default=["all"],
+        help=(
+            "Which slide sets to write. 'own' uses each model's own median "
+            "trajectory. 'with_phi_anchor' uses the with-phi median trajectory "
+            "for both models. 'no_phi_anchor' uses the no-phi median trajectory "
+            "for both models. Default 'all' writes all three folders."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -482,6 +494,74 @@ def select_group_median(
     return selected
 
 
+def add_group_rank(
+    selection: dict[str, Any],
+    group_indices: np.ndarray,
+    scores: dict[str, np.ndarray],
+    metric: str,
+) -> dict[str, Any]:
+    series_scores = []
+    for series_idx in group_indices:
+        rollout_idx = median_index(scores[metric][:, series_idx])
+        series_scores.append(
+            (int(series_idx), float(scores[metric][rollout_idx, series_idx]))
+        )
+    ordered = sorted(series_scores, key=lambda item: item[1])
+    ranks = {series_idx: rank + 1 for rank, (series_idx, _) in enumerate(ordered)}
+    selection["rank"] = int(ranks[int(selection["series_idx"])])
+    selection["rank_total"] = int(len(group_indices))
+    return selection
+
+
+def select_fixed_series_median(
+    series_idx: int,
+    group_indices: np.ndarray,
+    scores: dict[str, np.ndarray],
+    preds: list[np.ndarray],
+    metric: str,
+) -> dict[str, Any]:
+    rollout_idx = median_index(scores[metric][:, series_idx])
+    selection = {
+        "series_idx": int(series_idx),
+        "rollout_idx": int(rollout_idx),
+        "selection_score": float(scores[metric][rollout_idx, series_idx]),
+        "metrics": {
+            name: float(values[rollout_idx, series_idx])
+            for name, values in scores.items()
+        },
+        "prediction": preds[rollout_idx][:, series_idx, :],
+    }
+    return add_group_rank(selection, group_indices, scores, metric)
+
+
+def selected_slide_modes(requested: list[str]) -> list[str]:
+    if "all" in requested:
+        return ["own", "with_phi_anchor", "no_phi_anchor"]
+    modes = []
+    for mode in requested:
+        if mode not in modes:
+            modes.append(mode)
+    return modes
+
+
+def mode_output_dir(base_dir: Path, mode: str) -> Path:
+    names = {
+        "own": "own_medians",
+        "with_phi_anchor": "with_phi_median_trajectory",
+        "no_phi_anchor": "no_phi_median_trajectory",
+    }
+    return base_dir / names[mode]
+
+
+def mode_title(mode: str) -> str:
+    titles = {
+        "own": "own median trajectories",
+        "with_phi_anchor": "same trajectory anchored on with-phi median",
+        "no_phi_anchor": "same trajectory anchored on no-phi median",
+    }
+    return titles[mode]
+
+
 def make_plot_indices(n_steps: int, max_points: int) -> np.ndarray:
     if max_points <= 0 or max_points >= n_steps:
         return np.arange(n_steps)
@@ -510,12 +590,23 @@ def add_metric_box(
     metric: str,
     no_selected: dict[str, Any],
     phi_selected: dict[str, Any],
+    slide_mode_label: str,
 ) -> None:
+    phi_rank = (
+        f" rank {phi_selected['rank']}/{phi_selected['rank_total']}"
+        if "rank" in phi_selected
+        else ""
+    )
+    no_rank = (
+        f" rank {no_selected['rank']}/{no_selected['rank_total']}"
+        if "rank" in no_selected
+        else ""
+    )
     lines = [
-        f"phi={phi_value:.6g}, selection metric={metric.upper()}",
+        f"phi={phi_value:.6g}, selection metric={metric.upper()}, {slide_mode_label}",
         (
-            f"with phi: test {phi_selected['series_idx']} rollout {phi_selected['rollout_idx']} | "
-            f"no phi: test {no_selected['series_idx']} rollout {no_selected['rollout_idx']}"
+            f"with phi: test {phi_selected['series_idx']} rollout {phi_selected['rollout_idx']}{phi_rank} | "
+            f"no phi: test {no_selected['series_idx']} rollout {no_selected['rollout_idx']}{no_rank}"
         ),
     ]
     lines.extend(
@@ -573,6 +664,7 @@ def plot_phi_slide(
     phi_selected: dict[str, Any],
     plot_points: int,
     timeseries_prediction_steps: int,
+    slide_mode_label: str,
 ) -> None:
     phi_truth, phi_pred = full_prediction(
         test, phi_selected["prediction"], phi_selected["series_idx"], context_steps
@@ -649,10 +741,10 @@ def plot_phi_slide(
     )
     fig.suptitle(
         f"Stochastic median rollout | phi {phi_value:.6g} | "
-        f"{metric.upper()} improvement {improvement:+.2f}%",
+        f"{metric.upper()} improvement {improvement:+.2f}% | {slide_mode_label}",
         fontsize=15,
     )
-    add_metric_box(fig, phi_value, metric, no_selected, phi_selected)
+    add_metric_box(fig, phi_value, metric, no_selected, phi_selected, slide_mode_label)
     fig.tight_layout(rect=[0, 0.13, 1, 0.96])
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
@@ -702,6 +794,10 @@ def main() -> None:
     if args.torch_interop_threads is not None:
         print(f"Torch interop threads: {torch.get_num_interop_threads()}")
     print(f"Rollouts: {args.rollouts}")
+    slide_modes = selected_slide_modes(args.slide_modes)
+    for mode in slide_modes:
+        mode_output_dir(args.output_dir, mode).mkdir(parents=True, exist_ok=True)
+    print("Slide modes: " + ", ".join(slide_modes))
     print(
         "Selection metrics: "
         f"phi<=0 -> {args.nonpositive_phi_metric}, phi>0 -> {args.positive_phi_metric}"
@@ -753,6 +849,7 @@ def main() -> None:
         "selection": {
             "nonpositive_phi_metric": args.nonpositive_phi_metric,
             "positive_phi_metric": args.positive_phi_metric,
+            "slide_modes": slide_modes,
         },
         "phi_values": {},
     }
@@ -764,41 +861,79 @@ def main() -> None:
         print(f"Selecting phi={phi_value:g} with {metric.upper()}", flush=True)
         no_selected = select_group_median(group_indices, no_scores, no_preds, metric)
         phi_selected = select_group_median(group_indices, phi_scores, phi_preds, metric)
+        no_selected = add_group_rank(no_selected, group_indices, no_scores, metric)
+        phi_selected = add_group_rank(phi_selected, group_indices, phi_scores, metric)
 
         safe_phi = (
             f"{phi_value:+.6g}".replace("+", "p").replace("-", "m").replace(".", "p")
         )
-        slide_path = args.output_dir / f"median_rollout_phi_{safe_phi}.png"
-        plot_phi_slide(
-            slide_path,
-            test,
-            phi_value,
-            metric,
-            context_steps,
-            no_selected,
-            phi_selected,
-            args.plot_points,
-            args.timeseries_prediction_steps,
-        )
+        mode_selections: dict[str, dict[str, Any]] = {
+            "own": {
+                "no_phi": no_selected,
+                "with_phi": phi_selected,
+            },
+            "with_phi_anchor": {
+                "no_phi": select_fixed_series_median(
+                    int(phi_selected["series_idx"]),
+                    group_indices,
+                    no_scores,
+                    no_preds,
+                    metric,
+                ),
+                "with_phi": phi_selected,
+            },
+            "no_phi_anchor": {
+                "no_phi": no_selected,
+                "with_phi": select_fixed_series_median(
+                    int(no_selected["series_idx"]),
+                    group_indices,
+                    phi_scores,
+                    phi_preds,
+                    metric,
+                ),
+            },
+        }
 
         summary["phi_values"][str(phi_value)] = {
             "series_indices": [int(i) for i in group_indices],
             "selection_metric": metric,
-            "slide_path": str(slide_path),
-            "no_phi": strip_predictions(no_selected),
-            "with_phi": strip_predictions(phi_selected),
-            "metric_improvements_pct": {
-                name: percent_improvement(
-                    no_selected["metrics"][name], phi_selected["metrics"][name]
-                )
-                for name in METRIC_NAMES
-            },
+            "slide_sets": {},
         }
+        for mode in slide_modes:
+            mode_dir = mode_output_dir(args.output_dir, mode)
+            slide_path = mode_dir / f"median_rollout_phi_{safe_phi}.png"
+            mode_no_selected = mode_selections[mode]["no_phi"]
+            mode_phi_selected = mode_selections[mode]["with_phi"]
+            plot_phi_slide(
+                slide_path,
+                test,
+                phi_value,
+                metric,
+                context_steps,
+                mode_no_selected,
+                mode_phi_selected,
+                args.plot_points,
+                args.timeseries_prediction_steps,
+                mode_title(mode),
+            )
+            summary["phi_values"][str(phi_value)]["slide_sets"][mode] = {
+                "slide_path": str(slide_path),
+                "no_phi": strip_predictions(mode_no_selected),
+                "with_phi": strip_predictions(mode_phi_selected),
+                "metric_improvements_pct": {
+                    name: percent_improvement(
+                        mode_no_selected["metrics"][name],
+                        mode_phi_selected["metrics"][name],
+                    )
+                    for name in METRIC_NAMES
+                },
+            }
 
     summary_path = args.output_dir / "constant_parameter_stochastic_median_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"Written summary: {summary_path}")
-    print(f"Written slides: {args.output_dir / 'median_rollout_phi_*.png'}")
+    for mode in slide_modes:
+        print(f"Written {mode} slides: {mode_output_dir(args.output_dir, mode) / 'median_rollout_phi_*.png'}")
 
 
 if __name__ == "__main__":
