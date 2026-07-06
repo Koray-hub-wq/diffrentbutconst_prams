@@ -19,13 +19,23 @@ python resample_constant_parameter_windows.py ^
   --windows-per-trajectory 16
 
 #serverdatei
-source .venv/bin/activate
+source venv/bin/activate
 python constant_parameter_stochastic_median_slides_server.py \
   --repo-root ../DynaMix-python-b-tipping \
-  --data-dir ../training_data/single_halvorsen_constparams/14to209_noisy \
-  --with-phi-run ../DynaMix-python-b-tipping/results/single_halvorsen_constparams/14to209_noisy-with-phi \
-  --no-phi-run ../DynaMix-python-b-tipping/results/single_halvorsen_constparams/14to209_noisy-no-phi \
-  --output-dir ../DynaMix-python-b-tipping/results/single_halvorsen_constparams/14to209_noisy/median_stochastic_slides \
+  --data-dir ../training_data/single_halvorsen_constparams/14to209 \
+  --with-phi-run ../DynaMix-python-b-tipping/results/single_halvorsen_constparams/14to209-with-phi \
+  --no-phi-run ../DynaMix-python-b-tipping/results/single_halvorsen_constparams/14to209-no-phi \
+  --output-dir ../DynaMix-python-b-tipping/results/single_halvorsen_constparams/14to209_not_noisy/slides \
   --device cuda \
   --gpu-id 0 \
+  --torch-threads 4
+
+python constant_parameter_stochastic_median_slides_server.py \
+  --repo-root ../DynaMix-python-b-tipping \
+  --data-dir ../training_data/single_halvorsen_constparams/14to209_noisy_9params \
+  --with-phi-run ../DynaMix-python-b-tipping/results/single_halvorsen_constparams/14to209_noisy_9params-with-phi \
+  --no-phi-run ../DynaMix-python-b-tipping/results/single_halvorsen_constparams/14to209_noisy_9params-no-phi \
+  --output-dir ../DynaMix-python-b-tipping/results/single_halvorsen_constparams/14to209_noisy/9params_slides \
+  --device cuda \
+  --gpu-id 9 \
   --torch-threads 4
