@@ -42,6 +42,7 @@ except ImportError:
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEFAULT_ROLLOUTS = 50
 DEFAULT_TIMESERIES_PREDICTION_STEPS = 1000
+DEFAULT_RMSE_STEPS = 1000
 N_BINS = 30
 PS_SMOOTHING = 20
 MASE_STEPS = 10
@@ -118,6 +119,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_TIMESERIES_PREDICTION_STEPS,
         help="Number of forecast steps after the context shown in the dimension plots.",
+    )
+    parser.add_argument(
+        "--rmse-steps",
+        "--metric-steps",
+        dest="rmse_steps",
+        type=int,
+        default=DEFAULT_RMSE_STEPS,
+        help=(
+            "Number of forecast steps used for RMSE computation and RMSE-based "
+            "median selection. DH and DSTSP always use the full forecast "
+            "horizon. Use 0 for full-horizon RMSE."
+        ),
     )
     parser.add_argument(
         "--phi-round-decimals",
@@ -430,7 +443,7 @@ METRICS: dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
 
 
 def compute_metric_scores(
-    truth: np.ndarray, preds: list[np.ndarray]
+    truth: np.ndarray, preds: list[np.ndarray], rmse_steps: int
 ) -> dict[str, np.ndarray]:
     n_rollouts = len(preds)
     n_series = truth.shape[1]
@@ -442,7 +455,12 @@ def compute_metric_scores(
             y_true = truth[:, series_idx, :]
             y_pred = pred[:, series_idx, :]
             for name, fn in METRICS.items():
-                scores[name][rollout_idx, series_idx] = fn(y_true, y_pred)
+                if name == "rmse":
+                    scores[name][rollout_idx, series_idx] = fn(
+                        y_true[:rmse_steps], y_pred[:rmse_steps]
+                    )
+                else:
+                    scores[name][rollout_idx, series_idx] = fn(y_true, y_pred)
     return scores
 
 
@@ -807,8 +825,18 @@ def main() -> None:
         args.data_dir, args.context_steps
     )
     truth_future = test[context_steps:, :, :]
+    forecast_horizon = truth_future.shape[0]
+    if args.rmse_steps < 0:
+        raise ValueError("rmse_steps must be non-negative")
+    rmse_steps = forecast_horizon if args.rmse_steps == 0 else args.rmse_steps
+    rmse_steps = min(rmse_steps, forecast_horizon)
     phi_groups = group_series_by_phi(test_phi, args.phi_round_decimals)
     print(f"test: {test.shape}, context_steps={context_steps}")
+    print(
+        f"RMSE horizon: {rmse_steps}/{forecast_horizon} forecast steps; "
+        "DH and DSTSP use the full forecast horizon "
+        "(use --rmse-steps 0 for full-horizon RMSE)"
+    )
     print(
         "Phi groups: "
         + ", ".join(f"{phi:g}: {len(indices)}" for phi, indices in phi_groups.items())
@@ -833,9 +861,9 @@ def main() -> None:
         )
 
     print("Computing no-phi metrics", flush=True)
-    no_scores = compute_metric_scores(truth_future, no_preds)
+    no_scores = compute_metric_scores(truth_future, no_preds, rmse_steps)
     print("Computing with-phi metrics", flush=True)
-    phi_scores = compute_metric_scores(truth_future, phi_preds)
+    phi_scores = compute_metric_scores(truth_future, phi_preds, rmse_steps)
 
     summary: dict[str, Any] = {
         "rollouts": args.rollouts,
@@ -846,6 +874,9 @@ def main() -> None:
         "no_phi_run": str(args.no_phi_run),
         "context_steps": context_steps,
         "test_shape": list(test.shape),
+        "forecast_horizon": int(forecast_horizon),
+        "rmse_steps": int(rmse_steps),
+        "full_horizon_metrics": ["mase", "dh", "dstsp"],
         "selection": {
             "nonpositive_phi_metric": args.nonpositive_phi_metric,
             "positive_phi_metric": args.positive_phi_metric,
@@ -933,7 +964,9 @@ def main() -> None:
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"Written summary: {summary_path}")
     for mode in slide_modes:
-        print(f"Written {mode} slides: {mode_output_dir(args.output_dir, mode) / 'median_rollout_phi_*.png'}")
+        print(
+            f"Written {mode} slides: {mode_output_dir(args.output_dir, mode) / 'median_rollout_phi_*.png'}"
+        )
 
 
 if __name__ == "__main__":
