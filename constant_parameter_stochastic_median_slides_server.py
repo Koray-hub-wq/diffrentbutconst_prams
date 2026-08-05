@@ -270,9 +270,25 @@ def infer_architecture(
         if key.startswith("experts.") and key.split(".")[1].isdigit()
     }
     c_keys = [key for key in state if key.startswith("experts.") and key.endswith(".C")]
-    phi_dim = (
-        int(state[c_keys[0]].shape[1]) if c_keys else int(config.get("phi_dim", 0) or 0)
-    )
+    c_feature_dim = int(state[c_keys[0]].shape[1]) if c_keys else 0
+    phi_poly_order = int(config.get("phi_poly_order", 1) or 1)
+
+    if "phi_poly_order" in config:
+        config_phi_dim = int(config.get("phi_dim", 0) or 0)
+        if config_phi_dim > 0:
+            phi_dim = config_phi_dim
+        elif c_feature_dim:
+            if c_feature_dim % phi_poly_order != 0:
+                raise ValueError(
+                    f"C feature dimension {c_feature_dim} is not divisible by "
+                    f"phi_poly_order={phi_poly_order}"
+                )
+            phi_dim = c_feature_dim // phi_poly_order
+        else:
+            phi_dim = 0
+    else:
+        phi_dim = c_feature_dim if c_keys else int(config.get("phi_dim", 0) or 0)
+
     return {
         "M": latent_dim,
         "N": n_obs,
@@ -282,8 +298,9 @@ def infer_architecture(
         "expert_type": config.get("expert_type", "almost_linear_rnn"),
         "probabilistic_expert": bool(config.get("probabilistic_expert", False)),
         "phi_dim": phi_dim,
+        "phi_poly_order": phi_poly_order,
+        "c_feature_dim": c_feature_dim,
     }
-
 
 def load_model(run_dir: Path, device: str):
     DynaMix, DynaMixForecaster = import_dynamix()
@@ -300,8 +317,11 @@ def load_model(run_dir: Path, device: str):
         "expert_type": arch["expert_type"],
         "probabilistic_expert": arch["probabilistic_expert"],
     }
-    if "phi_dim" in inspect.signature(DynaMix).parameters:
+    signature = inspect.signature(DynaMix).parameters
+    if "phi_dim" in signature:
         kwargs["phi_dim"] = arch["phi_dim"]
+    if "phi_poly_order" in signature:
+        kwargs["phi_poly_order"] = arch["phi_poly_order"]
     model = DynaMix(**kwargs).to(device)
     model.load_state_dict(state)
     model.eval()
