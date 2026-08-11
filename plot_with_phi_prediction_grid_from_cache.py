@@ -26,7 +26,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label-space", choices=("phi", "raw", "both", "none"), default="phi")
     parser.add_argument("--raw-name", default="a")
     parser.add_argument("--title", default=None)
-    parser.add_argument("--plot-points", type=int, default=2500)
     parser.add_argument("--dpi", type=int, default=220)
     parser.add_argument("--view-elev", type=float, default=22.0)
     parser.add_argument("--view-azim", type=float, default=-58.0)
@@ -53,7 +52,6 @@ def main() -> None:
         title=args.title,
         label_space=args.label_space,
         raw_name=args.raw_name,
-        max_points=args.plot_points,
         dpi=args.dpi,
         view_elev=args.view_elev,
         view_azim=args.view_azim,

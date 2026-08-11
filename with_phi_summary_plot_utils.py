@@ -109,12 +109,6 @@ def select_group_median_prediction(
     return selected
 
 
-def make_plot_indices(n_steps: int, max_points: int | None) -> np.ndarray:
-    if max_points is None or max_points <= 0 or max_points >= n_steps:
-        return np.arange(n_steps)
-    return np.unique(np.linspace(0, n_steps - 1, max_points).astype(int))
-
-
 def row_lengths(n_plots: int, max_cols: int = 3) -> list[int]:
     if n_plots <= 0:
         return []
@@ -131,7 +125,7 @@ def add_centered_3d_axes(
     row_lengths_: list[int],
     *,
     left: float = 0.04,
-    right: float = 0.98,
+    right: float = 0.93,
     bottom: float = 0.08,
     top: float = 0.88,
     hgap: float = 0.04,
@@ -187,7 +181,6 @@ def plot_prediction_grid(
     title: str | None = None,
     label_space: str = "phi",
     raw_name: str = "a",
-    max_points: int | None = 2500,
     dpi: int = 220,
     figsize: tuple[float, float] | None = None,
     view_elev: float = 22.0,
@@ -202,26 +195,27 @@ def plot_prediction_grid(
     if figsize is None:
         figsize = (13.333, 7.5) if len(rows) <= 2 else (13.333, 2.9 * len(rows) + 1.1)
     fig = plt.figure(figsize=figsize, dpi=dpi)
-    axes = add_centered_3d_axes(fig, rows)
+    has_parameter_labels = label_space != "none"
+    axes_top = 0.88 if has_parameter_labels else 0.925
+    legend_y = 0.945 if has_parameter_labels else 0.94
+    title_y = 0.985 if has_parameter_labels else 0.972
+    axes = add_centered_3d_axes(fig, rows, top=axes_top)
 
     for ax, item_idx in zip(axes, selected_indices):
         truth = truth_future[item_idx]
         pred = pred_future[item_idx]
-        plot_idx = make_plot_indices(truth.shape[0], max_points)
-        truth_plot = truth[plot_idx]
-        pred_plot = pred[plot_idx]
         ax.plot(
-            truth_plot[:, 0],
-            truth_plot[:, 1],
-            truth_plot[:, 2],
+            truth[:, 0],
+            truth[:, 1],
+            truth[:, 2],
             color=TRUTH_COLOR,
             lw=1.1,
             label="Ground Truth",
         )
         ax.plot(
-            pred_plot[:, 0],
-            pred_plot[:, 1],
-            pred_plot[:, 2],
+            pred[:, 0],
+            pred[:, 1],
+            pred[:, 2],
             color=PRED_COLOR,
             lw=1.1,
             label="DynaMix",
@@ -233,18 +227,18 @@ def plot_prediction_grid(
             ax.set_title(label, fontsize=10, pad=1)
         ax.set_xlabel("Dimension 1", fontsize=8, labelpad=-5)
         ax.set_ylabel("Dimension 2", fontsize=8, labelpad=-5)
-        ax.set_zlabel("Dimension 3", fontsize=8, labelpad=-5)
+        ax.set_zlabel("Dimension 3", fontsize=8, labelpad=-3)
         ax.tick_params(labelsize=6, pad=-2)
         ax.view_init(elev=view_elev, azim=view_azim)
-        set_axes_equal_3d(ax, np.vstack([truth_plot, pred_plot]))
+        set_axes_equal_3d(ax, np.vstack([truth, pred]))
 
     handles = [
         mlines.Line2D([], [], color=TRUTH_COLOR, lw=1.4, label="Ground Truth"),
         mlines.Line2D([], [], color=PRED_COLOR, lw=1.4, label="DynaMix"),
     ]
-    fig.legend(handles=handles, loc="upper center", ncol=2, frameon=True, bbox_to_anchor=(0.5, 0.945))
+    fig.legend(handles=handles, loc="upper center", ncol=2, frameon=True, bbox_to_anchor=(0.5, legend_y))
     if title:
-        fig.suptitle(title, fontsize=17, fontweight="semibold", y=0.985)
+        fig.suptitle(title, fontsize=17, fontweight="semibold", y=title_y)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight")
+    fig.savefig(output_path, bbox_inches="tight", pad_inches=0.25)
     plt.close(fig)
