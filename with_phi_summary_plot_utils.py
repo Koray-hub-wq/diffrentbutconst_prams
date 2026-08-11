@@ -124,11 +124,11 @@ def add_centered_3d_axes(
     fig: plt.Figure,
     row_lengths_: list[int],
     *,
-    left: float = 0.04,
-    right: float = 0.96,
+    left: float = 0.025,
+    right: float = 0.965,
     bottom: float = 0.04,
     top: float = 0.88,
-    hgap: float = 0.04,
+    hgap: float = 0.015,
     vgap: float = 0.07,
     max_height_to_width: float = 1.15,
 ):
@@ -230,7 +230,7 @@ def plot_prediction_grid(
             ax.set_title(label, fontsize=10, pad=1)
         ax.set_xlabel("Dimension 1", fontsize=8, labelpad=-5)
         ax.set_ylabel("Dimension 2", fontsize=8, labelpad=-5)
-        ax.set_zlabel("Dimension 3", fontsize=8, labelpad=-10)
+        ax.set_zlabel("Dimension 3", fontsize=8, labelpad=-6)
         ax.tick_params(labelsize=6, pad=-2)
         ax.view_init(elev=view_elev, azim=view_azim)
         set_axes_equal_3d(ax, np.vstack([truth, pred]))
