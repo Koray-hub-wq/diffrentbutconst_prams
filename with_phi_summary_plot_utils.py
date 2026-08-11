@@ -125,8 +125,8 @@ def add_centered_3d_axes(
     row_lengths_: list[int],
     *,
     left: float = 0.04,
-    right: float = 0.93,
-    bottom: float = 0.08,
+    right: float = 0.96,
+    bottom: float = 0.04,
     top: float = 0.88,
     hgap: float = 0.04,
     vgap: float = 0.07,
@@ -198,10 +198,10 @@ def plot_prediction_grid(
         figsize = (13.333, 7.5) if len(rows) <= 2 else (13.333, 2.9 * len(rows) + 1.1)
     fig = plt.figure(figsize=figsize, dpi=dpi)
     has_parameter_labels = label_space != "none"
-    axes_top = 0.88 if has_parameter_labels else 0.895
+    axes_top = 0.88 if has_parameter_labels else 0.91
     legend_y = 0.945 if has_parameter_labels else 0.925
     title_y = 0.985 if has_parameter_labels else 0.972
-    height_ratio = 1.25 if has_parameter_labels else 1.05
+    height_ratio = 1.25 if has_parameter_labels else 1.35
     axes = add_centered_3d_axes(fig, rows, top=axes_top, max_height_to_width=height_ratio)
 
     for ax, item_idx in zip(axes, selected_indices):
@@ -230,7 +230,7 @@ def plot_prediction_grid(
             ax.set_title(label, fontsize=10, pad=1)
         ax.set_xlabel("Dimension 1", fontsize=8, labelpad=-5)
         ax.set_ylabel("Dimension 2", fontsize=8, labelpad=-5)
-        ax.set_zlabel("Dimension 3", fontsize=8, labelpad=-3)
+        ax.set_zlabel("Dimension 3", fontsize=8, labelpad=-10)
         ax.tick_params(labelsize=6, pad=-2)
         ax.view_init(elev=view_elev, azim=view_azim)
         set_axes_equal_3d(ax, np.vstack([truth, pred]))
