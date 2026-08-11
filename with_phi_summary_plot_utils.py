@@ -183,6 +183,7 @@ def plot_prediction_grid(
     title: str | None = None,
     label_space: str = "phi",
     raw_name: str = "a",
+    single_row: bool = False,
     dpi: int = 220,
     figsize: tuple[float, float] | None = None,
     view_elev: float = 22.0,
@@ -193,7 +194,7 @@ def plot_prediction_grid(
     if n_plots == 0:
         raise ValueError("No parameter values selected for plotting.")
 
-    rows = row_lengths(n_plots)
+    rows = [n_plots] if single_row else row_lengths(n_plots)
     if figsize is None:
         figsize = (13.333, 7.5) if len(rows) <= 2 else (13.333, 2.9 * len(rows) + 1.1)
     fig = plt.figure(figsize=figsize, dpi=dpi)

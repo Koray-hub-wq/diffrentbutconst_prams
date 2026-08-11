@@ -25,6 +25,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parameter-atol", type=float, default=1e-5)
     parser.add_argument("--label-space", choices=("phi", "raw", "both", "none"), default="phi")
     parser.add_argument("--raw-name", default="a")
+    parser.add_argument(
+        "--single-row",
+        action="store_true",
+        help="Place all selected parameter plots in one row instead of wrapping after three.",
+    )
     parser.add_argument("--title", default=None)
     parser.add_argument("--dpi", type=int, default=220)
     parser.add_argument("--view-elev", type=float, default=22.0)
@@ -52,6 +57,7 @@ def main() -> None:
         title=args.title,
         label_space=args.label_space,
         raw_name=args.raw_name,
+        single_row=args.single_row,
         dpi=args.dpi,
         view_elev=args.view_elev,
         view_azim=args.view_azim,
