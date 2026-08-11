@@ -26,6 +26,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label-space", choices=("phi", "raw", "both", "none"), default="phi")
     parser.add_argument("--raw-name", default="a")
     parser.add_argument(
+        "--model-label",
+        default=None,
+        help="Legend label for the prediction curve. Defaults to cache model_label or DynaMix.",
+    )
+    parser.add_argument(
         "--single-row",
         action="store_true",
         help="Place all selected parameter plots in one row instead of wrapping after three.",
@@ -44,6 +49,8 @@ def main() -> None:
     pred_future = cache["pred_future"]
     phi_values = cache["phi_values"].astype(float)
     raw_values = cache["raw_values"].astype(float)
+    cache_model_label = str(cache["model_label"].item()) if "model_label" in cache else "DynaMix"
+    model_label = args.model_label or cache_model_label
     selected_indices = resolve_requested_phi_values(
         phi_values, raw_values, args.params, args.parameter_space, args.parameter_atol
     )
@@ -57,6 +64,7 @@ def main() -> None:
         title=args.title,
         label_space=args.label_space,
         raw_name=args.raw_name,
+        prediction_label=model_label,
         single_row=args.single_row,
         dpi=args.dpi,
         view_elev=args.view_elev,

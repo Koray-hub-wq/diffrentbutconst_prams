@@ -30,17 +30,31 @@ from with_phi_summary_plot_utils import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run stochastic with-phi DynaMix rollouts, select one median prediction "
+            "Run stochastic DynaMix rollouts, select one median prediction "
             "per requested parameter value, save a cache, and write a 3D summary plot."
         )
     )
     parser.add_argument("--repo-root", type=Path, required=True)
-    parser.add_argument("--with-phi-run", type=Path, required=True)
+    parser.add_argument(
+        "--model-run",
+        "--with-phi-run",
+        dest="model_run",
+        type=Path,
+        required=True,
+        help=(
+            "Model run directory. --with-phi-run is kept as a backward-compatible alias."
+        ),
+    )
+    parser.add_argument(
+        "--model-label",
+        default="DynaMix",
+        help="Legend/cache label for the prediction curve, e.g. 'with phi' or 'no phi'.",
+    )
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--output-name", default="with_phi_median_prediction_grid.png")
-    parser.add_argument("--cache-name", default="with_phi_median_prediction_cache.npz")
-    parser.add_argument("--summary-name", default="with_phi_median_prediction_cache_summary.json")
+    parser.add_argument("--output-name", default=None)
+    parser.add_argument("--cache-name", default=None)
+    parser.add_argument("--summary-name", default=None)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--torch-threads", type=int, default=4)
@@ -94,6 +108,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def safe_label_stem(label: str) -> str:
+    chars = [ch.lower() if ch.isalnum() else "_" for ch in label.strip()]
+    stem = "".join(chars).strip("_")
+    while "__" in stem:
+        stem = stem.replace("__", "_")
+    return stem or "model"
+
+
 def save_cache(
     path: Path,
     *,
@@ -105,6 +127,7 @@ def save_cache(
     rollout_indices: np.ndarray,
     selection_scores: np.ndarray,
     selection_metrics: np.ndarray,
+    model_label: str,
     context_steps: int,
     metric_steps: int,
 ) -> None:
@@ -119,6 +142,7 @@ def save_cache(
         rollout_indices=rollout_indices.astype(np.int64),
         selection_scores=selection_scores.astype(np.float64),
         selection_metrics=selection_metrics.astype(str),
+        model_label=np.array(model_label),
         context_steps=np.array(context_steps, dtype=np.int64),
         metric_steps=np.array(metric_steps, dtype=np.int64),
     )
@@ -128,6 +152,10 @@ def main() -> None:
     args = parse_args()
     if args.rollouts <= 0:
         raise ValueError("--rollouts must be positive")
+    label_stem = safe_label_stem(args.model_label)
+    output_name = args.output_name or f"{label_stem}_median_prediction_grid.png"
+    cache_name = args.cache_name or f"{label_stem}_median_prediction_cache.npz"
+    summary_name = args.summary_name or f"{label_stem}_median_prediction_cache_summary.json"
 
     device = configure_runtime(args)
     set_repo_root(args.repo_root)
@@ -168,14 +196,16 @@ def main() -> None:
         )
     )
 
-    model, forecaster, *_ = load_model(args.with_phi_run, device)
+    print(f"Model run: {args.model_run}")
+    print(f"Model label: {args.model_label}")
+    model, forecaster, *_ = load_model(args.model_run, device)
     preds: list[np.ndarray] = []
     for rollout_idx in range(args.rollouts):
         print(f"Rollout {rollout_idx + 1}/{args.rollouts}", flush=True)
         pred = forecast_once(model, forecaster, test, test_phi, context_steps, device)
         preds.append(pred)
 
-    print("Computing with-phi metrics", flush=True)
+    print("Computing model metrics", flush=True)
     scores = compute_metric_scores(truth_all, preds, metric_steps)
 
     selected_truth = []
@@ -189,7 +219,8 @@ def main() -> None:
     summary: dict[str, Any] = {
         "rollouts": args.rollouts,
         "repo_root": str(args.repo_root),
-        "with_phi_run": str(args.with_phi_run),
+        "model_run": str(args.model_run),
+        "model_label": args.model_label,
         "data_dir": str(args.data_dir),
         "context_steps": context_steps,
         "forecast_horizon": int(forecast_horizon),
@@ -241,7 +272,7 @@ def main() -> None:
     pred_arr = np.stack(selected_pred, axis=0)
     phi_arr = np.asarray(selected_phi, dtype=float)
     raw_arr = np.asarray(selected_raw, dtype=float)
-    cache_path = args.output_dir / args.cache_name
+    cache_path = args.output_dir / cache_name
     save_cache(
         cache_path,
         truth_future=truth_arr,
@@ -252,11 +283,12 @@ def main() -> None:
         rollout_indices=np.asarray(selected_rollouts),
         selection_scores=np.asarray(selected_scores),
         selection_metrics=np.asarray(selected_metrics),
+        model_label=args.model_label,
         context_steps=context_steps,
         metric_steps=metric_steps,
     )
 
-    output_path = args.output_dir / args.output_name
+    output_path = args.output_dir / output_name
     plot_prediction_grid(
         output_path,
         truth_arr,
@@ -266,6 +298,7 @@ def main() -> None:
         title=args.title,
         label_space=args.label_space,
         raw_name=args.raw_name,
+        prediction_label=args.model_label,
         single_row=args.single_row,
         dpi=args.dpi,
         view_elev=args.view_elev,
@@ -274,7 +307,7 @@ def main() -> None:
 
     summary["cache_path"] = str(cache_path)
     summary["plot_path"] = str(output_path)
-    summary_path = args.output_dir / args.summary_name
+    summary_path = args.output_dir / summary_name
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"Written cache: {cache_path}")
     print(f"Written plot: {output_path}")

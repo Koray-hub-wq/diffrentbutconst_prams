@@ -183,6 +183,7 @@ def plot_prediction_grid(
     title: str | None = None,
     label_space: str = "phi",
     raw_name: str = "a",
+    prediction_label: str = "DynaMix",
     single_row: bool = False,
     dpi: int = 220,
     figsize: tuple[float, float] | None = None,
@@ -222,7 +223,7 @@ def plot_prediction_grid(
             pred[:, 2],
             color=PRED_COLOR,
             lw=1.1,
-            label="DynaMix",
+            label=prediction_label,
         )
         label = format_parameter_label(
             float(phi_values[item_idx]), float(raw_values[item_idx]), label_space, raw_name
@@ -238,7 +239,7 @@ def plot_prediction_grid(
 
     handles = [
         mlines.Line2D([], [], color=TRUTH_COLOR, lw=1.4, label="Ground Truth"),
-        mlines.Line2D([], [], color=PRED_COLOR, lw=1.4, label="DynaMix"),
+        mlines.Line2D([], [], color=PRED_COLOR, lw=1.4, label=prediction_label),
     ]
     fig.legend(handles=handles, loc="upper center", ncol=2, frameon=True, bbox_to_anchor=(0.5, legend_y))
     if title:
