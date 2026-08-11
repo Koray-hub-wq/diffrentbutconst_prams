@@ -44,6 +44,94 @@ def optional_load(path: Path, default: Array) -> Array:
     return default
 
 
+def load_constant_values(path: Path, fallback: Array) -> Array:
+    if path.exists():
+        values = np.load(path)
+        return np.asarray(values).reshape(-1)
+    return np.asarray(fallback[:, 0, 0]).reshape(-1)
+
+
+def values_match_any(values: Array, requested: list[float], atol: float) -> Array:
+    requested_arr = np.asarray(requested, dtype=np.float64)
+    values_arr = np.asarray(values, dtype=np.float64)
+    return np.any(np.isclose(values_arr[:, None], requested_arr[None, :], atol=atol, rtol=0.0), axis=1)
+
+
+def filter_series_by_parameter_values(
+    input_dir: Path,
+    trajectories: Array,
+    phi: Array,
+    phi_raw: Array,
+    regime_names: Array,
+    include_phi_values: list[float] | None,
+    include_raw_parameter_values: list[float] | None,
+    parameter_atol: float,
+) -> tuple[Array, Array, Array, Array, Array, dict[str, list[float] | int | None]]:
+    if include_phi_values and include_raw_parameter_values:
+        raise ValueError("Use only one of --include-phi-values or --include-raw-parameter-values")
+
+    n_series = trajectories.shape[0]
+    keep = np.ones(n_series, dtype=bool)
+    phi_constants = load_constant_values(input_dir / "trajectory_phi_constants.npy", phi)
+    raw_constants = load_constant_values(input_dir / "trajectory_phi_raw_constants.npy", phi_raw)
+
+    if include_phi_values:
+        keep = values_match_any(phi_constants, include_phi_values, parameter_atol)
+    elif include_raw_parameter_values:
+        keep = values_match_any(raw_constants, include_raw_parameter_values, parameter_atol)
+
+    if not np.any(keep):
+        available_phi = ", ".join(f"{value:.8g}" for value in sorted(np.unique(phi_constants)))
+        available_raw = ", ".join(f"{value:.8g}" for value in sorted(np.unique(raw_constants)))
+        raise ValueError(
+            "Parameter filter removed all trajectories. "
+            f"Available phi values: {available_phi}. "
+            f"Available raw parameter values: {available_raw}."
+        )
+
+    selected_indices = np.flatnonzero(keep)
+    info: dict[str, list[float] | int | None] = {
+        "include_phi_values": include_phi_values,
+        "include_raw_parameter_values": include_raw_parameter_values,
+        "parameter_atol": parameter_atol,
+        "n_series_before_filter": int(n_series),
+        "n_series_after_filter": int(selected_indices.size),
+        "selected_series_indices": [int(i) for i in selected_indices],
+        "selected_phi_values": [float(v) for v in sorted(np.unique(phi_constants[keep]))],
+        "selected_raw_parameter_values": [float(v) for v in sorted(np.unique(raw_constants[keep]))],
+    }
+
+    return (
+        trajectories[keep],
+        phi[keep],
+        phi_raw[keep],
+        regime_names[keep],
+        selected_indices,
+        info,
+    )
+
+
+def save_or_copy_filtered_array(
+    input_dir: Path,
+    output_dir: Path,
+    name: str,
+    selected_indices: Array,
+) -> None:
+    src = input_dir / name
+    if not src.exists():
+        return
+    value = np.load(src, allow_pickle=True)
+    if np.array_equal(selected_indices, np.arange(selected_indices.shape[0])):
+        shutil.copy2(src, output_dir / name)
+        return
+    if value.shape[0] <= int(selected_indices.max(initial=-1)):
+        raise ValueError(
+            f"Cannot filter {name}: first dimension {value.shape[0]} does not match "
+            f"source trajectory count implied by selected indices."
+        )
+    save_npy(output_dir / name, value[selected_indices])
+
+
 def build_training_windows(
     trajectories: Array,
     phi: Array,
@@ -174,6 +262,32 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also copy full trajectory arrays into the output directory.",
     )
+    parser.add_argument(
+        "--include-phi-values",
+        nargs="+",
+        type=float,
+        default=None,
+        help=(
+            "Only include trajectories whose constant normalized phi value matches "
+            "one of these values, e.g. --include-phi-values -1 -0.5 0 0.5 1."
+        ),
+    )
+    parser.add_argument(
+        "--include-raw-parameter-values",
+        nargs="+",
+        type=float,
+        default=None,
+        help=(
+            "Only include trajectories whose raw parameter value matches one of "
+            "these values, e.g. Halvorsen a values."
+        ),
+    )
+    parser.add_argument(
+        "--parameter-atol",
+        type=float,
+        default=1e-5,
+        help="Absolute tolerance for matching included phi/raw parameter values.",
+    )
     return parser.parse_args()
 
 
@@ -196,6 +310,23 @@ def main() -> None:
     regime_names = optional_load(
         args.input_dir / "trajectory_regime_names.npy",
         np.array([f"series_{i}" for i in range(trajectories.shape[0])]),
+    )
+    (
+        trajectories,
+        phi,
+        phi_raw,
+        regime_names,
+        selected_indices,
+        parameter_filter,
+    ) = filter_series_by_parameter_values(
+        args.input_dir,
+        trajectories,
+        phi,
+        phi_raw,
+        regime_names,
+        args.include_phi_values,
+        args.include_raw_parameter_values,
+        args.parameter_atol,
     )
 
     windows = build_training_windows(
@@ -226,15 +357,12 @@ def main() -> None:
         "trajectory_phi_raw_constants.npy",
     ]
     for name in passthrough_arrays:
-        src = args.input_dir / name
-        if src.exists():
-            shutil.copy2(src, args.output_dir / name)
+        save_or_copy_filtered_array(args.input_dir, args.output_dir, name, selected_indices)
 
     if args.copy_full_arrays:
-        for name in ["trajectories.npy", "trajectory_phi.npy", "trajectory_phi_raw.npy"]:
-            src = args.input_dir / name
-            if src.exists():
-                shutil.copy2(src, args.output_dir / name)
+        save_npy(args.output_dir / "trajectories.npy", trajectories.astype(np.float32))
+        save_npy(args.output_dir / "trajectory_phi.npy", phi.astype(np.float32))
+        save_npy(args.output_dir / "trajectory_phi_raw.npy", phi_raw.astype(np.float32))
 
     source_metadata_path = args.input_dir / "metadata.json"
     source_metadata = {}
@@ -260,6 +388,7 @@ def main() -> None:
             "test_phi": list(test["test_phi"].shape),
         },
         "sample_counts": {"random": int(windows["data"].shape[1])},
+        "parameter_filter": parameter_filter,
         "window_layout_convention": (
             "context covers [start, start + context_len). data covers the last "
             "overlap_len context steps plus all steps after context until seq_len, "
@@ -281,6 +410,12 @@ def main() -> None:
     for key, shape in metadata["shapes"].items():
         print(f"{key}: {shape}")
     print(f"sample_counts: {metadata['sample_counts']}")
+    if parameter_filter["include_phi_values"] or parameter_filter["include_raw_parameter_values"]:
+        print(
+            "parameter_filter: "
+            f"{parameter_filter['n_series_before_filter']} -> "
+            f"{parameter_filter['n_series_after_filter']} trajectories"
+        )
 
 
 if __name__ == "__main__":
