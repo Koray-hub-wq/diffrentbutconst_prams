@@ -130,11 +130,13 @@ def add_centered_3d_axes(
     top: float = 0.88,
     hgap: float = 0.04,
     vgap: float = 0.07,
+    max_height_to_width: float = 1.15,
 ):
     max_cols = max(row_lengths_)
     n_rows = len(row_lengths_)
     cell_w = (right - left - hgap * (max_cols - 1)) / max_cols
-    cell_h = (top - bottom - vgap * (n_rows - 1)) / n_rows
+    available_h = (top - bottom - vgap * (n_rows - 1)) / n_rows
+    cell_h = min(available_h, cell_w * max_height_to_width)
     axes = []
     for row, n_cols in enumerate(row_lengths_):
         row_width = n_cols * cell_w + (n_cols - 1) * hgap
@@ -196,10 +198,11 @@ def plot_prediction_grid(
         figsize = (13.333, 7.5) if len(rows) <= 2 else (13.333, 2.9 * len(rows) + 1.1)
     fig = plt.figure(figsize=figsize, dpi=dpi)
     has_parameter_labels = label_space != "none"
-    axes_top = 0.88 if has_parameter_labels else 0.925
-    legend_y = 0.945 if has_parameter_labels else 0.94
+    axes_top = 0.88 if has_parameter_labels else 0.895
+    legend_y = 0.945 if has_parameter_labels else 0.925
     title_y = 0.985 if has_parameter_labels else 0.972
-    axes = add_centered_3d_axes(fig, rows, top=axes_top)
+    height_ratio = 1.25 if has_parameter_labels else 1.05
+    axes = add_centered_3d_axes(fig, rows, top=axes_top, max_height_to_width=height_ratio)
 
     for ax, item_idx in zip(axes, selected_indices):
         truth = truth_future[item_idx]
