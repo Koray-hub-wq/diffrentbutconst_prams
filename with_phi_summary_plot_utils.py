@@ -230,9 +230,9 @@ def plot_prediction_grid(
         )
         if label:
             ax.set_title(label, fontsize=10, pad=1)
-        ax.set_xlabel("Dimension 1", fontsize=8, labelpad=-5)
-        ax.set_ylabel("Dimension 2", fontsize=8, labelpad=-5)
-        ax.set_zlabel("Dimension 3", fontsize=8, labelpad=-6)
+        ax.set_xlabel("x", fontsize=8, labelpad=-5)
+        ax.set_ylabel("y", fontsize=8, labelpad=-5)
+        ax.set_zlabel("z", fontsize=8, labelpad=-6)
         ax.tick_params(labelsize=6, pad=-2)
         ax.view_init(elev=view_elev, azim=view_azim)
         set_axes_equal_3d(ax, np.vstack([truth, pred]))
