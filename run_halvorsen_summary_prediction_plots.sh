@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="/export/home/klenkeit/DynaMix-python-b-tipping"
 RESULTS_ROOT="../DynaMix-python-b-tipping/results/single_halvorsen_constparams"
-DATA_DIR="../training_data/single_halvorsen_constparams/14to209_9params"
+DATA_DIR="../training_data/single_halvorsen_constparams/14to209_noisy_9params"
 PLOTS_ROOT="../Dynamixclub_präsi/plots"
 GPU_ID="${GPU_ID:-5}"
 
