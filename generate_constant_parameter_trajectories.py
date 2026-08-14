@@ -7,6 +7,8 @@ one constant normalized phi value selected by --phi-values.
 Output layout:
 
     trajectories.npy                  (S, T, 3)
+    trajectories_clean.npy            (S, T, 3)  only when noise is requested
+    ../<output-dir-name>_clean/       clean dataset mirror for resampling
     trajectory_phi.npy                (S, T, 1)
     trajectory_phi_raw.npy            (S, T, 1)
     trajectory_regime_index.npy       (S,)
@@ -198,8 +200,14 @@ def main() -> None:
         raise ValueError("No regimes selected.")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    clean_output_dir = (
+        args.output_dir.with_name(f"{args.output_dir.name}_clean")
+        if args.noise_std_fraction > 0.0
+        else None
+    )
 
     all_traj = []
+    all_traj_clean = []
     all_phi = []
     all_phi_raw = []
     series_regime_names = []
@@ -222,8 +230,12 @@ def main() -> None:
             max_step_multiplier=args.max_step_multiplier,
             burn_in_steps=args.burn_in_steps,
         )
-        traj, mean, std = standardize_trajectories(traj)
-        traj = add_gaussian_noise(traj, rng, args.noise_std_fraction)
+        traj_clean, mean, std = standardize_trajectories(traj)
+        if args.noise_std_fraction > 0.0:
+            traj = add_gaussian_noise(traj_clean.copy(), rng, args.noise_std_fraction)
+            all_traj_clean.append(traj_clean)
+        else:
+            traj = traj_clean
         all_traj.append(traj)
         all_phi.append(np.repeat(phi_one[None, :, :], args.trajectories_per_phi, axis=0))
         all_phi_raw.append(np.repeat(phi_raw_one[None, :, :], args.trajectories_per_phi, axis=0))
@@ -238,17 +250,30 @@ def main() -> None:
         np.save(args.output_dir / f"{stem}_std.npy", std)
 
     trajectories = np.concatenate(all_traj, axis=0)
+    trajectories_clean = (
+        np.concatenate(all_traj_clean, axis=0)
+        if args.noise_std_fraction > 0.0
+        else None
+    )
     phi = np.concatenate(all_phi, axis=0)
     phi_raw = np.concatenate(all_phi_raw, axis=0)
 
     np.save(args.output_dir / "trajectories.npy", trajectories)
+    if trajectories_clean is not None:
+        np.save(args.output_dir / "trajectories_clean.npy", trajectories_clean)
     np.save(args.output_dir / "trajectory_phi.npy", phi)
     np.save(args.output_dir / "trajectory_phi_raw.npy", phi_raw)
-    np.save(args.output_dir / "trajectory_regime_index.npy", np.array(regime_index, dtype=np.int64))
-    np.save(args.output_dir / "trajectory_regime_names.npy", np.array(series_regime_names))
-    np.save(args.output_dir / "trajectory_phi_value_index.npy", np.array(phi_value_index, dtype=np.int64))
-    np.save(args.output_dir / "trajectory_phi_constants.npy", np.array(phi_constants, dtype=np.float32))
-    np.save(args.output_dir / "trajectory_phi_raw_constants.npy", np.array(phi_raw_constants, dtype=np.float32))
+    regime_index_array = np.array(regime_index, dtype=np.int64)
+    regime_names_array = np.array(series_regime_names)
+    phi_value_index_array = np.array(phi_value_index, dtype=np.int64)
+    phi_constants_array = np.array(phi_constants, dtype=np.float32)
+    phi_raw_constants_array = np.array(phi_raw_constants, dtype=np.float32)
+
+    np.save(args.output_dir / "trajectory_regime_index.npy", regime_index_array)
+    np.save(args.output_dir / "trajectory_regime_names.npy", regime_names_array)
+    np.save(args.output_dir / "trajectory_phi_value_index.npy", phi_value_index_array)
+    np.save(args.output_dir / "trajectory_phi_constants.npy", phi_constants_array)
+    np.save(args.output_dir / "trajectory_phi_raw_constants.npy", phi_raw_constants_array)
 
     metadata = {
         "description": (
@@ -258,8 +283,39 @@ def main() -> None:
         "args": vars(args) | {"output_dir": str(args.output_dir)},
         "shapes": {
             "trajectories": list(trajectories.shape),
+            **(
+                {"trajectories_clean": list(trajectories_clean.shape)}
+                if trajectories_clean is not None
+                else {}
+            ),
             "trajectory_phi": list(phi.shape),
             "trajectory_phi_raw": list(phi_raw.shape),
+        },
+        "trajectory_files": {
+            "trajectories": (
+                "trajectories.npy contains standardized trajectories with Gaussian "
+                "noise when noise_std_fraction > 0, otherwise standardized clean trajectories."
+            ),
+            **(
+                {
+                    "trajectories_clean": (
+                        "trajectories_clean.npy contains the same standardized trajectories "
+                        "before observation noise was added."
+                    )
+                }
+                if trajectories_clean is not None
+                else {}
+            ),
+            **(
+                {
+                    "clean_dataset_dir": (
+                        f"{clean_output_dir} mirrors this dataset for resampling; "
+                        "its trajectories.npy is the clean standardized trajectory array."
+                    )
+                }
+                if clean_output_dir is not None
+                else {}
+            ),
         },
         "regimes": [asdict(regime) for regime in regimes],
         "requested_phi_values": [float(v) for v in args.phi_values],
@@ -281,7 +337,43 @@ def main() -> None:
     with open(args.output_dir / "metadata.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
+    if clean_output_dir is not None and trajectories_clean is not None:
+        clean_output_dir.mkdir(parents=True, exist_ok=True)
+        np.save(clean_output_dir / "trajectories.npy", trajectories_clean)
+        np.save(clean_output_dir / "trajectory_phi.npy", phi)
+        np.save(clean_output_dir / "trajectory_phi_raw.npy", phi_raw)
+        np.save(clean_output_dir / "trajectory_regime_index.npy", regime_index_array)
+        np.save(clean_output_dir / "trajectory_regime_names.npy", regime_names_array)
+        np.save(clean_output_dir / "trajectory_phi_value_index.npy", phi_value_index_array)
+        np.save(clean_output_dir / "trajectory_phi_constants.npy", phi_constants_array)
+        np.save(clean_output_dir / "trajectory_phi_raw_constants.npy", phi_raw_constants_array)
+
+        clean_metadata = metadata | {
+            "description": (
+                "Clean constant-parameter trajectories mirrored from a noisy run. "
+                "Each trajectory uses one fixed raw parameter value derived from a "
+                "requested normalized phi value."
+            ),
+            "args": metadata["args"] | {"output_dir": str(clean_output_dir)},
+            "shapes": {
+                "trajectories": list(trajectories_clean.shape),
+                "trajectory_phi": list(phi.shape),
+                "trajectory_phi_raw": list(phi_raw.shape),
+            },
+            "trajectory_files": {
+                "trajectories": (
+                    "trajectories.npy contains standardized clean trajectories before "
+                    "Gaussian observation noise was added in the paired noisy dataset."
+                )
+            },
+            "paired_noisy_dir": str(args.output_dir),
+        }
+        with open(clean_output_dir / "metadata.json", "w", encoding="utf-8") as f:
+            json.dump(clean_metadata, f, indent=2)
+
     print(f"Saved trajectories to {args.output_dir.resolve()}")
+    if clean_output_dir is not None:
+        print(f"Saved clean trajectories to {clean_output_dir.resolve()}")
     for key, shape in metadata["shapes"].items():
         print(f"{key}: {shape}")
 
