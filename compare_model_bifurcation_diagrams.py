@@ -19,6 +19,7 @@ python compare_model_bifurcation_diagrams.py \
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import sys
 from pathlib import Path
 from typing import Any
@@ -38,18 +39,45 @@ from constant_parameter_stochastic_median_slides_server import (  # noqa: E402
     set_repo_root,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
-from time_varying_bifurcation_data.generate_dynamic_regime_trajectories import (  # noqa: E402
-    RHS,
-    Regime,
-    default_regimes,
-    normalize_phi,
-    observe_state,
-    standardize_trajectories,
-)
+def import_regime_module():
+    script_dir = Path(__file__).resolve().parent
+    local_file = script_dir / "generate_dynamic_regime_trajectories.py"
+    if local_file.exists():
+        spec = importlib.util.spec_from_file_location(
+            "local_generate_dynamic_regime_trajectories", local_file
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load regime module from {local_file}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    parent = script_dir.parent
+    if str(parent) not in sys.path:
+        sys.path.insert(0, str(parent))
+    try:
+        from time_varying_bifurcation_data import generate_dynamic_regime_trajectories
+    except ModuleNotFoundError as exc:
+        if exc.name != "time_varying_bifurcation_data":
+            raise
+        raise ModuleNotFoundError(
+            "Could not import the regime definitions. Copy "
+            "generate_dynamic_regime_trajectories.py into the same directory as "
+            "compare_model_bifurcation_diagrams.py, or provide the original "
+            "time_varying_bifurcation_data package next to diffrentbutconst_prams."
+        ) from exc
+    return generate_dynamic_regime_trajectories
+
+
+_REGIME_MODULE = import_regime_module()
+RHS = _REGIME_MODULE.RHS
+Regime = _REGIME_MODULE.Regime
+default_regimes = _REGIME_MODULE.default_regimes
+normalize_phi = _REGIME_MODULE.normalize_phi
+observe_state = _REGIME_MODULE.observe_state
+standardize_trajectories = _REGIME_MODULE.standardize_trajectories
 
 
 COMPONENTS = {"x": 0, "y": 1, "z": 2}
