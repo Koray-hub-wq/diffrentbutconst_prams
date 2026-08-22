@@ -3,7 +3,8 @@ r"""Compare trained DynaMix models with a true bifurcation diagram.
 For every value in one shared parameter sweep, the script simulates the chosen
 regime with a constant parameter, standardizes that trajectory in the same style
 as the training-data generator, forecasts from the initial context with each
-model, and plots local maxima of one component.
+model, caches local maxima for all three components, and plots selected
+components.
 
 Example:
 
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -167,7 +169,14 @@ def parse_args() -> argparse.Namespace:
         default=5000,
         help="Burn-in at each constant parameter before recording.",
     )
-    parser.add_argument("--component", choices=tuple(COMPONENTS), default="x")
+    parser.add_argument(
+        "--components",
+        "--component",
+        nargs="+",
+        choices=tuple(COMPONENTS),
+        default=["x"],
+        help="One or more state components used for bifurcation diagrams.",
+    )
     parser.add_argument("--rollouts", type=int, default=1)
     parser.add_argument("--seed", type=int, default=8)
     parser.add_argument("--rtol", type=float, default=1e-6)
@@ -184,10 +193,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--torch-threads", type=int, default=4)
     parser.add_argument("--torch-interop-threads", type=int, default=1)
-    parser.add_argument("--point-size", type=float, default=0.16)
-    parser.add_argument("--alpha", type=float, default=0.65)
+    parser.add_argument("--point-size", type=float, default=2.0)
+    parser.add_argument("--alpha", type=float, default=0.9)
     parser.add_argument("--dpi", type=int, default=200)
     parser.add_argument("--output", type=Path, default=Path("model_bifurcation_compare.png"))
+    parser.add_argument(
+        "--cache",
+        type=Path,
+        default=None,
+        help=(
+            "Cache file for computed bifurcation points. Defaults to the output "
+            "path with .npz suffix. Existing compatible cache files are reused."
+        ),
+    )
+    parser.add_argument(
+        "--force-recompute",
+        action="store_true",
+        help="Ignore an existing cache and recompute the sweep.",
+    )
     return parser.parse_args()
 
 
@@ -339,7 +362,7 @@ def forecast_model(
     return pred.detach().cpu().numpy().astype(np.float32)[:, 0, :]
 
 
-def collect_points(
+def collect_component_points(
     parameter_values: np.ndarray,
     truth_peaks: list[np.ndarray],
     model_peaks: list[list[np.ndarray]],
@@ -370,7 +393,146 @@ def collect_points(
     return truth_points, all_model_points
 
 
-def plot_comparison(
+def collect_points_by_component(
+    parameter_values: np.ndarray,
+    truth_peaks: dict[str, list[np.ndarray]],
+    model_peaks: dict[str, list[list[np.ndarray]]],
+) -> dict[str, tuple[tuple[np.ndarray, np.ndarray], list[tuple[np.ndarray, np.ndarray]]]]:
+    return {
+        component: collect_component_points(
+            parameter_values,
+            truth_peaks[component],
+            model_peaks[component],
+        )
+        for component in COMPONENTS
+    }
+
+
+def cache_metadata(args: argparse.Namespace, regime: Regime) -> dict[str, Any]:
+    truth_steps = args.forecast_steps if args.truth_steps is None else args.truth_steps
+    return {
+        "regime": regime.name,
+        "model_runs": [str(path) for path in args.model_runs],
+        "num_parameters": args.num_parameters,
+        "parameter_min": args.parameter_min,
+        "parameter_max": args.parameter_max,
+        "phi_min": args.phi_min,
+        "phi_max": args.phi_max,
+        "dt": args.dt,
+        "context_steps": args.context_steps,
+        "forecast_steps": args.forecast_steps,
+        "truth_steps": truth_steps,
+        "burn_in_steps": args.burn_in_steps,
+        "rollouts": args.rollouts,
+        "seed": args.seed,
+        "rtol": args.rtol,
+        "atol": args.atol,
+        "max_step_multiplier": args.max_step_multiplier,
+    }
+
+
+def cache_matches(path: Path, expected_metadata: dict[str, Any]) -> bool:
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            cached_metadata = json.loads(str(data["metadata"].item()))
+    except (OSError, KeyError, ValueError, json.JSONDecodeError):
+        return False
+    return cached_metadata == expected_metadata
+
+
+def save_points_cache(
+    path: Path,
+    metadata: dict[str, Any],
+    parameter_values: np.ndarray,
+    points_by_component: dict[str, tuple[tuple[np.ndarray, np.ndarray], list[tuple[np.ndarray, np.ndarray]]]],
+) -> None:
+    payload: dict[str, Any] = {
+        "metadata": np.array(json.dumps(metadata), dtype=np.str_),
+        "parameter_values": parameter_values.astype(np.float64),
+    }
+    for component, (truth_points, model_points) in points_by_component.items():
+        payload[f"{component}_truth_x"] = truth_points[0].astype(np.float64)
+        payload[f"{component}_truth_y"] = truth_points[1].astype(np.float64)
+        for model_idx, points in enumerate(model_points):
+            payload[f"{component}_model_{model_idx}_x"] = points[0].astype(np.float64)
+            payload[f"{component}_model_{model_idx}_y"] = points[1].astype(np.float64)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, **payload)
+
+
+def load_points_cache(
+    path: Path,
+    n_models: int,
+) -> tuple[np.ndarray, dict[str, tuple[tuple[np.ndarray, np.ndarray], list[tuple[np.ndarray, np.ndarray]]]]]:
+    with np.load(path, allow_pickle=False) as data:
+        parameter_values = data["parameter_values"]
+        points_by_component = {}
+        for component in COMPONENTS:
+            truth_points = (data[f"{component}_truth_x"], data[f"{component}_truth_y"])
+            model_points = [
+                (data[f"{component}_model_{model_idx}_x"], data[f"{component}_model_{model_idx}_y"])
+                for model_idx in range(n_models)
+            ]
+            points_by_component[component] = (truth_points, model_points)
+    return parameter_values, points_by_component
+
+
+def output_for_component(output: Path, component: str, n_components: int) -> Path:
+    if n_components == 1:
+        return output
+    return output.with_name(f"{output.stem}_{component}{output.suffix}")
+
+
+def safe_filename_label(label: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in label)
+    return safe.strip("_") or "plot"
+
+
+def individual_output_path(output: Path, component: str, label: str, n_components: int) -> Path:
+    suffix = f"_{component}" if n_components > 1 else ""
+    return output.with_name(f"{output.stem}{suffix}_{safe_filename_label(label)}{output.suffix}")
+
+
+def style_bifurcation_axis(
+    ax,
+    regime: Regime,
+    parameter_values: np.ndarray,
+    component: str,
+    *,
+    show_ylabel: bool,
+) -> None:
+    ax.set_xlim(float(np.min(parameter_values)), float(np.max(parameter_values)))
+    ax.set_xlabel(regime.parameter, fontsize=12)
+    if show_ylabel:
+        ax.set_ylabel(f"local maxima of {component}(t), standardized", fontsize=12)
+    ax.tick_params(labelsize=11)
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.1)
+
+
+def plot_single(
+    output: Path,
+    regime: Regime,
+    parameter_values: np.ndarray,
+    points: tuple[np.ndarray, np.ndarray],
+    label: str,
+    component: str,
+    point_size: float,
+    alpha: float,
+    dpi: int,
+) -> None:
+    fig, ax = plt.subplots(figsize=(16, 5.0), dpi=dpi)
+    ax.scatter(points[0], points[1], s=point_size, c="black", alpha=alpha, linewidths=0)
+    ax.set_title(f"{label} - {regime.family} {regime.name}", fontsize=14, fontweight="semibold")
+    style_bifurcation_axis(ax, regime, parameter_values, component, show_ylabel=True)
+    fig.tight_layout()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output)
+    plt.close(fig)
+
+
+def plot_combined(
     output: Path,
     regime: Regime,
     parameter_values: np.ndarray,
@@ -383,30 +545,23 @@ def plot_comparison(
     dpi: int,
 ) -> None:
     n_panels = 1 + len(model_points)
-    fig_w = max(10.0, 3.8 * n_panels)
     fig, axes = plt.subplots(
-        1,
         n_panels,
-        figsize=(fig_w, 6.0),
+        1,
+        figsize=(16.0, max(4.0, 3.5 * n_panels)),
         dpi=dpi,
         sharex=True,
         sharey=True,
-        squeeze=False,
+        squeeze=True,
     )
-    axes_flat = list(axes[0])
+    axes_flat = np.atleast_1d(axes).ravel()
     labels = ["Ground Truth", *model_labels]
     points = [truth_points, *model_points]
-    colors = ["black", *plt.cm.tab10(np.linspace(0, 1, max(1, len(model_points))))]
 
-    for ax, label, (x_values, y_values), color in zip(axes_flat, labels, points, colors):
-        ax.scatter(x_values, y_values, s=point_size, c=[color], alpha=alpha, linewidths=0)
-        ax.set_title(f"{label}\n{len(y_values)} maxima", fontsize=10)
-        ax.grid(True, color="0.88", linewidth=0.6)
-        ax.set_xlabel(regime.parameter)
-
-    axes_flat[0].set_ylabel(f"local maxima of {component}(t), standardized")
-    for ax in axes_flat:
-        ax.set_xlim(float(np.min(parameter_values)), float(np.max(parameter_values)))
+    for ax, label, point_pair in zip(axes_flat, labels, points):
+        ax.scatter(point_pair[0], point_pair[1], s=point_size, c="black", alpha=alpha, linewidths=0)
+        ax.set_title(label, fontsize=13)
+        style_bifurcation_axis(ax, regime, parameter_values, component, show_ylabel=True)
 
     fig.suptitle(
         f"{regime.family}: {regime.name} bifurcation comparison",
@@ -417,6 +572,55 @@ def plot_comparison(
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output)
     plt.close(fig)
+
+
+def write_plots(
+    output: Path,
+    regime: Regime,
+    parameter_values: np.ndarray,
+    points_by_component: dict[str, tuple[tuple[np.ndarray, np.ndarray], list[tuple[np.ndarray, np.ndarray]]]],
+    labels: list[str],
+    components: list[str],
+    point_size: float,
+    alpha: float,
+    dpi: int,
+) -> list[Path]:
+    written = []
+    n_components = len(components)
+    for component in components:
+        truth_points, model_points = points_by_component[component]
+        combined_output = output_for_component(output, component, n_components)
+        plot_combined(
+            output=combined_output,
+            regime=regime,
+            parameter_values=parameter_values,
+            truth_points=truth_points,
+            model_points=model_points,
+            model_labels=labels,
+            component=component,
+            point_size=point_size,
+            alpha=alpha,
+            dpi=dpi,
+        )
+        written.append(combined_output)
+
+        all_labels = ["Ground Truth", *labels]
+        all_points = [truth_points, *model_points]
+        for label, points in zip(all_labels, all_points):
+            single_output = individual_output_path(output, component, label, n_components)
+            plot_single(
+                output=single_output,
+                regime=regime,
+                parameter_values=parameter_values,
+                points=points,
+                label=label,
+                component=component,
+                point_size=point_size,
+                alpha=alpha,
+                dpi=dpi,
+            )
+            written.append(single_output)
+    return written
 
 
 def list_regimes_and_exit() -> None:
@@ -438,20 +642,44 @@ def main() -> None:
         raise ValueError("--rollouts must be positive")
     if args.model_labels is not None and len(args.model_labels) != len(args.model_runs):
         raise ValueError("--model-labels must have the same length as --model-runs")
-    if args.device.startswith("cuda") and not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA was requested but torch.cuda.is_available() is False. "
-            "Use a CUDA-enabled PyTorch environment or pass --device cpu only for debugging."
-        )
 
     regime = regime_by_name(args.regime)
     truth_steps = args.forecast_steps if args.truth_steps is None else args.truth_steps
     if truth_steps <= 2:
         raise ValueError("--truth-steps must be > 2")
     n_steps = args.context_steps + max(args.forecast_steps, truth_steps)
-    component_idx = COMPONENTS[args.component]
+    components = list(dict.fromkeys(args.components))
     parameter_values = parameter_values_from_args(args, regime)
     labels = args.model_labels or [path.name for path in args.model_runs]
+    cache_path = args.cache if args.cache is not None else args.output.with_suffix(".npz")
+    expected_metadata = cache_metadata(args, regime)
+
+    if cache_path.exists() and not args.force_recompute and cache_matches(cache_path, expected_metadata):
+        print(f"Using cached bifurcation points: {cache_path.resolve()}")
+        parameter_values, points_by_component = load_points_cache(cache_path, len(args.model_runs))
+        written = write_plots(
+            output=args.output,
+            regime=regime,
+            parameter_values=parameter_values,
+            points_by_component=points_by_component,
+            labels=labels,
+            components=components,
+            point_size=args.point_size,
+            alpha=args.alpha,
+            dpi=args.dpi,
+        )
+        for path in written:
+            print(f"Saved plot: {path.resolve()}")
+        return
+
+    if cache_path.exists() and not args.force_recompute:
+        print(f"Ignoring incompatible cache: {cache_path.resolve()}")
+
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA was requested but torch.cuda.is_available() is False. "
+            "Use a CUDA-enabled PyTorch environment or pass --device cpu only for debugging."
+        )
 
     device = configure_runtime(args)
     set_repo_root(args.repo_root)
@@ -469,8 +697,12 @@ def main() -> None:
         f"{regime.parameter}=[{parameter_values[0]:.6g}, {parameter_values[-1]:.6g}]"
     )
     rng = np.random.default_rng(args.seed)
-    truth_peaks: list[np.ndarray] = []
-    model_peaks: list[list[np.ndarray]] = [[] for _ in models]
+    truth_peaks: dict[str, list[np.ndarray]] = {
+        component: [] for component in COMPONENTS
+    }
+    model_peaks: dict[str, list[list[np.ndarray]]] = {
+        component: [[] for _ in models] for component in COMPONENTS
+    }
 
     for raw_parameter in tqdm(parameter_values, desc="Bifurcation sweep"):
         trajectory = simulate_standardized_constant_parameter(
@@ -485,11 +717,12 @@ def main() -> None:
             burn_in_steps=args.burn_in_steps,
         )
         truth_slice = trajectory[args.context_steps : args.context_steps + truth_steps]
-        truth_peaks.append(local_maxima(truth_slice[:, component_idx]))
+        for component, component_idx in COMPONENTS.items():
+            truth_peaks[component].append(local_maxima(truth_slice[:, component_idx]))
 
         phi_value = normalized_phi(regime, float(raw_parameter))
         for model_idx, (model, forecaster, *_rest) in enumerate(models):
-            rollout_peaks = []
+            rollout_peaks = {component: [] for component in COMPONENTS}
             for _ in range(args.rollouts):
                 pred = forecast_model(
                     model=model,
@@ -500,29 +733,37 @@ def main() -> None:
                     forecast_steps=args.forecast_steps,
                     device=device,
                 )
-                rollout_peaks.append(local_maxima(pred[:, component_idx]))
-            model_peaks[model_idx].append(
-                np.concatenate(rollout_peaks) if rollout_peaks else np.empty(0)
-            )
+                for component, component_idx in COMPONENTS.items():
+                    rollout_peaks[component].append(local_maxima(pred[:, component_idx]))
+            for component in COMPONENTS:
+                peaks = rollout_peaks[component]
+                model_peaks[component][model_idx].append(
+                    np.concatenate(peaks) if peaks else np.empty(0)
+                )
 
-    truth_points, model_points = collect_points(parameter_values, truth_peaks, model_peaks)
-    plot_comparison(
+    points_by_component = collect_points_by_component(parameter_values, truth_peaks, model_peaks)
+    save_points_cache(cache_path, expected_metadata, parameter_values, points_by_component)
+    print(f"Saved cache: {cache_path.resolve()}")
+
+    written = write_plots(
         output=args.output,
         regime=regime,
         parameter_values=parameter_values,
-        truth_points=truth_points,
-        model_points=model_points,
-        model_labels=labels,
-        component=args.component,
+        points_by_component=points_by_component,
+        labels=labels,
+        components=components,
         point_size=args.point_size,
         alpha=args.alpha,
         dpi=args.dpi,
     )
 
-    print(f"Saved plot: {args.output.resolve()}")
-    print(f"Ground-truth maxima: {len(truth_points[1])}")
-    for label, points in zip(labels, model_points):
-        print(f"{label} maxima: {len(points[1])}")
+    for path in written:
+        print(f"Saved plot: {path.resolve()}")
+    for component in components:
+        truth_points, model_points = points_by_component[component]
+        print(f"{component}: Ground-truth maxima: {len(truth_points[1])}")
+        for label, points in zip(labels, model_points):
+            print(f"{component}: {label} maxima: {len(points[1])}")
 
 
 if __name__ == "__main__":
