@@ -1,4 +1,4 @@
-"""Server-friendly stochastic median rollout slides per constant phi value.
+﻿"""Server-friendly stochastic median rollout slides per constant phi value.
 
 This is the portable version of constant_parameter_stochastic_median_slides.py.
 It has no local Windows path defaults for the DynaMix repo. Pass all relevant
@@ -320,6 +320,8 @@ def load_model(run_dir: Path, device: str):
     signature = inspect.signature(DynaMix).parameters
     if "phi_dim" in signature:
         kwargs["phi_dim"] = arch["phi_dim"]
+    if "use_expert_phi" in signature:
+        kwargs["use_expert_phi"] = bool(config.get("use_expert_phi", False))
     if "phi_poly_order" in signature:
         kwargs["phi_poly_order"] = arch["phi_poly_order"]
     model = DynaMix(**kwargs).to(device)
@@ -370,10 +372,23 @@ def forecast_once(
     ids = list(range(test.shape[1]))
     context_t = torch.tensor(test[:context_steps, ids, :], device=device)
     kwargs = {}
-    if getattr(model, "phi_dim", 0) > 0:
-        kwargs["phi_future"] = torch.tensor(
-            test_phi[context_steps:, ids, :], device=device
+    context_phi_dim = int(getattr(model, "context_phi_dim", 0) or 0)
+    phi_dim = int(getattr(model, "phi_dim", 0) or 0)
+
+    if context_phi_dim > 0:
+        kwargs["context_phi"] = torch.tensor(
+            test_phi[:context_steps, ids, :context_phi_dim], device=device
         )
+
+    # Old Cphi models do not have use_expert_phi/context_phi_dim. For those,
+    # phi_dim > 0 means the expert needs future phi. In context-phi models,
+    # future phi is only needed when the optional expert Cphi path is enabled.
+    use_expert_phi = bool(getattr(model, "use_expert_phi", context_phi_dim == 0))
+    if phi_dim > 0 and use_expert_phi:
+        kwargs["phi_future"] = torch.tensor(
+            test_phi[context_steps:, ids, :phi_dim], device=device
+        )
+
     pred = forecaster.forecast(context_t, horizon, **kwargs)
     return pred.detach().cpu().numpy().astype(np.float32)
 
@@ -991,3 +1006,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
