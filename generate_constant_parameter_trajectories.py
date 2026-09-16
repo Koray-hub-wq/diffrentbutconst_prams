@@ -2,7 +2,8 @@
 
 This mirrors time_varying_bifurcation_data/generate_dynamic_regime_trajectories.py
 but does not sweep parameters over time. Instead, each trajectory is simulated at
-one constant normalized phi value selected by --phi-values.
+one constant normalized phi value. Phi values can either be listed explicitly
+with --phi-values or sampled randomly per trajectory with --phi-sampling random.
 
 Output layout:
 
@@ -51,6 +52,35 @@ Array = np.ndarray
 def raw_parameter_from_normalized_phi(regime: Regime, phi: float) -> float:
     scale = max(abs(regime.start - regime.boundary), abs(regime.end - regime.boundary), 1e-8)
     return float(regime.boundary + phi * scale)
+
+
+def default_phi_range(regime: Regime) -> tuple[float, float]:
+    values = normalize_phi(
+        np.array([regime.start, regime.end], dtype=np.float32),
+        regime.start,
+        regime.end,
+        regime.boundary,
+    ).astype(np.float64)
+    return float(min(values)), float(max(values))
+
+
+def random_phi_values_for_regime(
+    regime: Regime,
+    n_values: int,
+    rng: np.random.Generator,
+    phi_min: float | None,
+    phi_max: float | None,
+) -> list[float]:
+    default_min, default_max = default_phi_range(regime)
+    low = default_min if phi_min is None else float(phi_min)
+    high = default_max if phi_max is None else float(phi_max)
+    if low > high:
+        raise ValueError(
+            f"Invalid phi range for {regime.name}: min {low:g} is greater than max {high:g}"
+        )
+    if low == high:
+        return [low] * n_values
+    return [float(v) for v in rng.uniform(low, high, size=n_values)]
 
 
 def phi_label(phi: float) -> str:
@@ -147,9 +177,48 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         type=float,
         default=[-1.0, 0.0, 1.0],
-        help="Normalized phi values to simulate for every selected regime.",
+        help=(
+            "Normalized phi values to simulate for every selected regime when "
+            "--phi-sampling values is used."
+        ),
+    )
+    parser.add_argument(
+        "--phi-sampling",
+        choices=("values", "random"),
+        default="values",
+        help=(
+            "Use explicit --phi-values, or sample one random constant phi value "
+            "per trajectory."
+        ),
     )
     parser.add_argument("--trajectories-per-phi", type=int, default=8)
+    parser.add_argument(
+        "--random-trajectories-per-regime",
+        type=int,
+        default=None,
+        help=(
+            "Number of trajectories per regime when --phi-sampling random is used. "
+            "Defaults to --trajectories-per-phi for backwards-compatible CLI usage."
+        ),
+    )
+    parser.add_argument(
+        "--random-phi-min",
+        type=float,
+        default=None,
+        help=(
+            "Lower bound for random phi sampling. If omitted, each regime uses "
+            "its own default lower phi value from its raw start/end range."
+        ),
+    )
+    parser.add_argument(
+        "--random-phi-max",
+        type=float,
+        default=None,
+        help=(
+            "Upper bound for random phi sampling. If omitted, each regime uses "
+            "its own default upper phi value from its raw start/end range."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=8)
     parser.add_argument("--rtol", type=float, default=1e-6)
     parser.add_argument("--atol", type=float, default=1e-8)
@@ -185,8 +254,17 @@ def main() -> None:
         raise ValueError("n_steps must be positive")
     if args.trajectories_per_phi <= 0:
         raise ValueError("trajectories_per_phi must be positive")
-    if not args.phi_values:
+    if args.random_trajectories_per_regime is not None and args.random_trajectories_per_regime <= 0:
+        raise ValueError("random_trajectories_per_regime must be positive")
+    if args.phi_sampling == "values" and not args.phi_values:
         raise ValueError("At least one --phi-values entry is required")
+    if (
+        args.phi_sampling == "random"
+        and args.random_phi_min is not None
+        and args.random_phi_max is not None
+        and args.random_phi_min > args.random_phi_max
+    ):
+        raise ValueError("--random-phi-min must be <= --random-phi-max")
 
     rng = np.random.default_rng(args.seed)
     regimes = default_regimes()
@@ -216,14 +294,39 @@ def main() -> None:
     phi_constants = []
     phi_raw_constants = []
 
-    jobs = [(regime_idx, regime, phi_idx, phi) for regime_idx, regime in enumerate(regimes) for phi_idx, phi in enumerate(args.phi_values)]
-    for regime_idx, regime, phi_idx, phi in tqdm(jobs, desc="Simulating constant-parameter regimes"):
+    if args.phi_sampling == "values":
+        jobs = [
+            (regime_idx, regime, phi_idx, phi, args.trajectories_per_phi)
+            for regime_idx, regime in enumerate(regimes)
+            for phi_idx, phi in enumerate(args.phi_values)
+        ]
+    else:
+        n_random = (
+            args.random_trajectories_per_regime
+            if args.random_trajectories_per_regime is not None
+            else args.trajectories_per_phi
+        )
+        jobs = []
+        for regime_idx, regime in enumerate(regimes):
+            random_phi_values = random_phi_values_for_regime(
+                regime,
+                n_values=n_random,
+                rng=rng,
+                phi_min=args.random_phi_min,
+                phi_max=args.random_phi_max,
+            )
+            jobs.extend(
+                (regime_idx, regime, phi_idx, phi, 1)
+                for phi_idx, phi in enumerate(random_phi_values)
+            )
+
+    for regime_idx, regime, phi_idx, phi, n_trajectories in tqdm(jobs, desc="Simulating constant-parameter regimes"):
         traj, phi_one, phi_raw_one, raw_parameter = simulate_constant_parameter(
             regime,
             phi_value=phi,
             n_steps=args.n_steps,
             dt=args.dt,
-            n_trajectories=args.trajectories_per_phi,
+            n_trajectories=n_trajectories,
             rng=rng,
             rtol=args.rtol,
             atol=args.atol,
@@ -237,13 +340,13 @@ def main() -> None:
         else:
             traj = traj_clean
         all_traj.append(traj)
-        all_phi.append(np.repeat(phi_one[None, :, :], args.trajectories_per_phi, axis=0))
-        all_phi_raw.append(np.repeat(phi_raw_one[None, :, :], args.trajectories_per_phi, axis=0))
-        series_regime_names.extend([regime.name] * args.trajectories_per_phi)
-        regime_index.extend([regime_idx] * args.trajectories_per_phi)
-        phi_value_index.extend([phi_idx] * args.trajectories_per_phi)
-        phi_constants.extend([float(phi_one[0, 0])] * args.trajectories_per_phi)
-        phi_raw_constants.extend([raw_parameter] * args.trajectories_per_phi)
+        all_phi.append(np.repeat(phi_one[None, :, :], n_trajectories, axis=0))
+        all_phi_raw.append(np.repeat(phi_raw_one[None, :, :], n_trajectories, axis=0))
+        series_regime_names.extend([regime.name] * n_trajectories)
+        regime_index.extend([regime_idx] * n_trajectories)
+        phi_value_index.extend([phi_idx] * n_trajectories)
+        phi_constants.extend([float(phi_one[0, 0])] * n_trajectories)
+        phi_raw_constants.extend([raw_parameter] * n_trajectories)
 
         stem = f"{regime.name}_phi_{phi_label(float(phi_one[0, 0]))}"
         np.save(args.output_dir / f"{stem}_mean.npy", mean)
@@ -278,7 +381,7 @@ def main() -> None:
     metadata = {
         "description": (
             "Constant-parameter trajectories. Each trajectory uses one fixed raw "
-            "parameter value derived from a requested normalized phi value."
+            "parameter value derived from a normalized phi value."
         ),
         "args": vars(args) | {"output_dir": str(args.output_dir)},
         "shapes": {
@@ -318,7 +421,25 @@ def main() -> None:
             ),
         },
         "regimes": [asdict(regime) for regime in regimes],
-        "requested_phi_values": [float(v) for v in args.phi_values],
+        "phi_sampling": args.phi_sampling,
+        "requested_phi_values": (
+            [float(v) for v in args.phi_values]
+            if args.phi_sampling == "values"
+            else None
+        ),
+        "sampled_phi_values": (
+            [float(v) for v in phi_constants_array]
+            if args.phi_sampling == "random"
+            else None
+        ),
+        "sampled_phi_raw_values": (
+            [float(v) for v in phi_raw_constants_array]
+            if args.phi_sampling == "random"
+            else None
+        ),
+        "default_phi_ranges_by_regime": {
+            regime.name: list(default_phi_range(regime)) for regime in regimes
+        },
         "phi_convention": (
             "phi arrays are normalized as (raw_parameter - transition_boundary) / "
             "max(abs(start-boundary), abs(end-boundary)); boundary is therefore phi=0. "

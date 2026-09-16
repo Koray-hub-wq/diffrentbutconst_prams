@@ -1,14 +1,17 @@
-﻿__pycache__/
-*.pyc
-.ipynb_checkpoints/
+# Ignore everything by default.
+*
 
-# generated data
-14to209/
-14to209_noisy/
-generated*/
-resampled*/
-*.npy
-*.npz
-*.png
-*.pt
-*.safetensors
+# Keep directories traversable so nested allow rules can match.
+!*/
+
+# Track source and notebooks.
+!*.py
+!*.ipynb
+
+# Track this ignore file.
+!.gitignore
+
+# Ignore Python and notebook runtime artifacts even if nested.
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
