@@ -60,6 +60,24 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to the DynaMix-python-b-tipping repository.",
     )
+    parser.add_argument(
+        "--with-phi-repo-root",
+        type=Path,
+        default=None,
+        help=(
+            "Optional repository root used only for loading --with-phi-run. "
+            "Defaults to --repo-root."
+        ),
+    )
+    parser.add_argument(
+        "--no-phi-repo-root",
+        type=Path,
+        default=None,
+        help=(
+            "Optional repository root used only for loading --no-phi-run. "
+            "Defaults to --repo-root."
+        ),
+    )
     parser.add_argument("--with-phi-run", type=Path, required=True)
     parser.add_argument("--no-phi-run", type=Path, required=True)
     parser.add_argument("--data-dir", type=Path, required=True)
@@ -302,7 +320,9 @@ def infer_architecture(
         "c_feature_dim": c_feature_dim,
     }
 
-def load_model(run_dir: Path, device: str):
+def load_model(run_dir: Path, device: str, repo_root: Path | None = None):
+    if repo_root is not None:
+        set_repo_root(repo_root)
     DynaMix, DynaMixForecaster = import_dynamix()
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
     checkpoint_path = find_checkpoint(run_dir)
@@ -836,7 +856,12 @@ def main() -> None:
     set_repo_root(args.repo_root)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    with_phi_repo_root = args.with_phi_repo_root or args.repo_root
+    no_phi_repo_root = args.no_phi_repo_root or args.repo_root
+
     print(f"Repo root: {_REPO_ROOT}")
+    print(f"With-phi repo root: {with_phi_repo_root.resolve()}")
+    print(f"No-phi repo root: {no_phi_repo_root.resolve()}")
     print(f"Data: {args.data_dir}")
     print(f"With phi: {args.with_phi_run}")
     print(f"No phi: {args.no_phi_run}")
@@ -877,8 +902,12 @@ def main() -> None:
         + ", ".join(f"{phi:g}: {len(indices)}" for phi, indices in phi_groups.items())
     )
 
-    no_model, no_forecaster, *_ = load_model(args.no_phi_run, device)
-    phi_model, phi_forecaster, *_ = load_model(args.with_phi_run, device)
+    no_model, no_forecaster, *_ = load_model(
+        args.no_phi_run, device, repo_root=no_phi_repo_root
+    )
+    phi_model, phi_forecaster, *_ = load_model(
+        args.with_phi_run, device, repo_root=with_phi_repo_root
+    )
 
     no_preds: list[np.ndarray] = []
     phi_preds: list[np.ndarray] = []
