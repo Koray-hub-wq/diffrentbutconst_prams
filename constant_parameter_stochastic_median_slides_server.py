@@ -214,8 +214,10 @@ def set_repo_root(repo_root: Path) -> None:
     src = _REPO_ROOT / "src"
     if not src.exists():
         raise FileNotFoundError(f"Expected DynaMix src directory at {src}")
-    if str(src) not in sys.path:
-        sys.path.insert(0, str(src))
+    src_str = str(src)
+    while src_str in sys.path:
+        sys.path.remove(src_str)
+    sys.path.insert(0, src_str)
 
 
 def ensure_repo_src_on_path() -> None:
@@ -224,8 +226,9 @@ def ensure_repo_src_on_path() -> None:
             "Repository root is not configured. Call set_repo_root first."
         )
     src = str(_REPO_ROOT / "src")
-    if src not in sys.path:
-        sys.path.insert(0, src)
+    while src in sys.path:
+        sys.path.remove(src)
+    sys.path.insert(0, src)
 
 
 def purge_dynamix_modules() -> None:
