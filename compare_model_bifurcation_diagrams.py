@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from scipy.integrate import solve_ivp
 from tqdm import tqdm
 
@@ -90,8 +93,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--repo-root",
         type=Path,
-        required=True,
+        default=None,
         help="Path to the DynaMix repository whose src directory should be used.",
+    )
+    parser.add_argument(
+        "--model-type",
+        choices=("auto", "dynamix", "alrnn"),
+        default="auto",
+        help=(
+            "Model run format. 'auto' treats runs with model.pt and metrics.json "
+            "as single ALRNN runs, otherwise DynaMix runs."
+        ),
     )
     parser.add_argument(
         "--model-runs",
@@ -154,7 +166,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--forecast-steps",
         type=int,
-        default=3000,
+        default=15000,
         help="Number of forecast steps used to extract model local maxima.",
     )
     parser.add_argument(
@@ -196,7 +208,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--point-size", type=float, default=4.0)
     parser.add_argument("--alpha", type=float, default=0.9)
     parser.add_argument("--dpi", type=int, default=200)
-    parser.add_argument("--output", type=Path, default=Path("model_bifurcation_compare.png"))
+    parser.add_argument(
+        "--output", type=Path, default=Path("model_bifurcation_compare.png")
+    )
     parser.add_argument(
         "--cache",
         type=Path,
@@ -241,7 +255,9 @@ def regime_by_name(name: str) -> Regime:
 
 
 def raw_from_phi(regime: Regime, phi: np.ndarray | float) -> np.ndarray:
-    scale = max(abs(regime.start - regime.boundary), abs(regime.end - regime.boundary), 1e-8)
+    scale = max(
+        abs(regime.start - regime.boundary), abs(regime.end - regime.boundary), 1e-8
+    )
     return regime.boundary + np.asarray(phi, dtype=np.float64) * scale
 
 
@@ -258,6 +274,54 @@ def normalized_phi(regime: Regime, raw_parameter: float) -> float:
 
 def local_maxima(values: np.ndarray) -> np.ndarray:
     return values[1:-1][(values[1:-1] > values[:-2]) & (values[1:-1] > values[2:])]
+
+
+class AL_RNN(nn.Module):
+    """Single ALRNN model definition used by ALRNN-DSR/alrnn_python runs."""
+
+    def __init__(self, M: int, P: int, N: int, phi_dim: int = 0):
+        super().__init__()
+        self.M = M
+        self.P = P
+        self.N = N
+        self.phi_dim = phi_dim
+        self.A, self.W, self.h = self.initialize_AWh_random()
+        self.B = self.init_uniform((self.N, self.M))
+        if self.phi_dim > 0:
+            self.C = nn.Parameter(torch.zeros(self.M, self.phi_dim))
+        else:
+            self.register_parameter("C", None)
+
+    def forward(
+        self, z: torch.Tensor, phi_t: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        z_unactivated = torch.clone(z)
+        if self.P > 0:
+            z[:, -self.P :] = F.relu(z[:, -self.P :])
+        out = self.A * z_unactivated + z @ self.W.t() + self.h
+        if self.C is not None:
+            if phi_t is None:
+                raise ValueError("phi_t must be provided when phi_dim > 0")
+            out = out + phi_t @ self.C.t()
+        return out
+
+    def initialize_AWh_random(self) -> tuple[nn.Parameter, nn.Parameter, nn.Parameter]:
+        A = nn.Parameter(torch.diagonal(self.normalized_positive_definite(self.M), 0))
+        W = nn.Parameter(torch.randn(self.M, self.M) * 0.01)
+        h = nn.Parameter(torch.zeros(self.M))
+        return A, W, h
+
+    def normalized_positive_definite(self, M: int) -> torch.Tensor:
+        R = np.random.randn(M, M).astype(np.float32)
+        K = np.matmul(R.T, R) / M + np.eye(M)
+        lambda_max = np.max(np.abs(np.linalg.eigvals(K)))
+        return torch.tensor(K / lambda_max).float()
+
+    def init_uniform(self, shape: tuple[int, int]) -> nn.Parameter:
+        tensor = torch.empty(*shape)
+        radius = 1 / math.sqrt(shape[0])
+        torch.nn.init.uniform_(tensor, -radius, radius)
+        return nn.Parameter(tensor, requires_grad=True)
 
 
 def simulate_standardized_constant_parameter(
@@ -325,17 +389,29 @@ def parameter_values_from_args(args: argparse.Namespace, regime: Regime) -> np.n
     using_phi = args.phi_min is not None or args.phi_max is not None
     using_raw = args.parameter_min is not None or args.parameter_max is not None
     if using_phi and using_raw:
-        raise ValueError("Use either --phi-min/--phi-max or --parameter-min/--parameter-max, not both.")
+        raise ValueError(
+            "Use either --phi-min/--phi-max or --parameter-min/--parameter-max, not both."
+        )
     if args.num_parameters <= 0:
         raise ValueError("--num-parameters must be positive")
 
     if using_phi:
         if args.phi_min is None or args.phi_max is None:
             raise ValueError("Pass both --phi-min and --phi-max.")
-        return raw_from_phi(regime, np.linspace(args.phi_min, args.phi_max, args.num_parameters))
+        return raw_from_phi(
+            regime, np.linspace(args.phi_min, args.phi_max, args.num_parameters)
+        )
 
-    low = min(regime.start, regime.end) if args.parameter_min is None else args.parameter_min
-    high = max(regime.start, regime.end) if args.parameter_max is None else args.parameter_max
+    low = (
+        min(regime.start, regime.end)
+        if args.parameter_min is None
+        else args.parameter_min
+    )
+    high = (
+        max(regime.start, regime.end)
+        if args.parameter_max is None
+        else args.parameter_max
+    )
     return np.linspace(low, high, args.num_parameters)
 
 
@@ -349,7 +425,9 @@ def forecast_model(
     forecast_steps: int,
     device: str,
 ) -> np.ndarray:
-    context = torch.tensor(trajectory[:context_steps, None, :], dtype=torch.float32, device=device)
+    context = torch.tensor(
+        trajectory[:context_steps, None, :], dtype=torch.float32, device=device
+    )
     kwargs: dict[str, torch.Tensor] = {}
     if getattr(model, "phi_dim", 0) > 0:
         kwargs["phi_future"] = torch.full(
@@ -360,6 +438,102 @@ def forecast_model(
         )
     pred = forecaster.forecast(context, forecast_steps, **kwargs)
     return pred.detach().cpu().numpy().astype(np.float32)[:, 0, :]
+
+
+def detect_model_type(run_dir: Path, requested_type: str) -> str:
+    if requested_type != "auto":
+        return requested_type
+    if (run_dir / "model.pt").exists() and (run_dir / "metrics.json").exists():
+        return "alrnn"
+    return "dynamix"
+
+
+def load_alrnn_model(run_dir: Path, device: str) -> tuple[AL_RNN, dict[str, Any], Path]:
+    metrics_path = run_dir / "metrics.json"
+    model_path = run_dir / "model.pt"
+    if not metrics_path.exists():
+        raise FileNotFoundError(f"Expected ALRNN metrics.json at {metrics_path}")
+    if not model_path.exists():
+        raise FileNotFoundError(f"Expected ALRNN model.pt at {model_path}")
+
+    with open(metrics_path, "r", encoding="utf-8") as f:
+        metrics = json.load(f)
+    run_args = metrics.get("args", {})
+    latent_dim_value = run_args.get("latent_dim", metrics.get("latent_dim"))
+    pwl_units_value = run_args.get("pwl_units", metrics.get("pwl_units"))
+    if latent_dim_value is None or pwl_units_value is None:
+        raise ValueError(
+            f"Could not infer ALRNN architecture from {metrics_path}. "
+            "Expected args.latent_dim and args.pwl_units."
+        )
+    latent_dim = int(latent_dim_value)
+    pwl_units = int(pwl_units_value)
+    n_dims = int(metrics.get("N", 3))
+    phi_dim = int(metrics.get("phi_dim", 1 if run_args.get("use_phi") else 0))
+
+    model = AL_RNN(M=latent_dim, P=pwl_units, N=n_dims, phi_dim=phi_dim).to(device)
+    state = torch.load(model_path, map_location=device)
+    model.load_state_dict(state)
+    model.eval()
+    return model, metrics, model_path
+
+
+@torch.no_grad()
+def forecast_alrnn_model(
+    model: AL_RNN,
+    trajectory: np.ndarray,
+    phi_value: float,
+    context_steps: int,
+    forecast_steps: int,
+    device: str,
+) -> np.ndarray:
+    # The single ALRNN has no encoder/context assimilation. Match its training
+    # evaluation: seed the latent state from one observed x and then free-run.
+    seed_idx = max(context_steps - 1, 0)
+    x = torch.tensor(
+        trajectory[seed_idx : seed_idx + 1, :], dtype=torch.float32, device=device
+    )
+    z = x @ model.B
+    z[:, 0 : model.N] = x
+    phi = None
+    if model.phi_dim > 0:
+        phi = torch.full(
+            (1, model.phi_dim), float(phi_value), dtype=torch.float32, device=device
+        )
+
+    out = torch.empty((forecast_steps, model.N), dtype=torch.float32, device=device)
+    for t in range(forecast_steps):
+        z = model(z, phi)
+        out[t] = z[0, 0 : model.N]
+    return out.detach().cpu().numpy().astype(np.float32)
+
+
+def forecast_loaded_model(
+    loaded: dict[str, Any],
+    trajectory: np.ndarray,
+    phi_value: float,
+    context_steps: int,
+    forecast_steps: int,
+    device: str,
+) -> np.ndarray:
+    if loaded["type"] == "alrnn":
+        return forecast_alrnn_model(
+            model=loaded["model"],
+            trajectory=trajectory,
+            phi_value=phi_value,
+            context_steps=context_steps,
+            forecast_steps=forecast_steps,
+            device=device,
+        )
+    return forecast_model(
+        model=loaded["model"],
+        forecaster=loaded["forecaster"],
+        trajectory=trajectory,
+        phi_value=phi_value,
+        context_steps=context_steps,
+        forecast_steps=forecast_steps,
+        device=device,
+    )
 
 
 def collect_component_points(
@@ -397,7 +571,9 @@ def collect_points_by_component(
     parameter_values: np.ndarray,
     truth_peaks: dict[str, list[np.ndarray]],
     model_peaks: dict[str, list[list[np.ndarray]]],
-) -> dict[str, tuple[tuple[np.ndarray, np.ndarray], list[tuple[np.ndarray, np.ndarray]]]]:
+) -> dict[
+    str, tuple[tuple[np.ndarray, np.ndarray], list[tuple[np.ndarray, np.ndarray]]]
+]:
     return {
         component: collect_component_points(
             parameter_values,
@@ -412,6 +588,7 @@ def cache_metadata(args: argparse.Namespace, regime: Regime) -> dict[str, Any]:
     truth_steps = args.forecast_steps if args.truth_steps is None else args.truth_steps
     return {
         "regime": regime.name,
+        "model_type": args.model_type,
         "model_runs": [str(path) for path in args.model_runs],
         "num_parameters": args.num_parameters,
         "parameter_min": args.parameter_min,
@@ -444,7 +621,9 @@ def save_points_cache(
     path: Path,
     metadata: dict[str, Any],
     parameter_values: np.ndarray,
-    points_by_component: dict[str, tuple[tuple[np.ndarray, np.ndarray], list[tuple[np.ndarray, np.ndarray]]]],
+    points_by_component: dict[
+        str, tuple[tuple[np.ndarray, np.ndarray], list[tuple[np.ndarray, np.ndarray]]]
+    ],
 ) -> None:
     payload: dict[str, Any] = {
         "metadata": np.array(json.dumps(metadata), dtype=np.str_),
@@ -464,14 +643,22 @@ def save_points_cache(
 def load_points_cache(
     path: Path,
     n_models: int,
-) -> tuple[np.ndarray, dict[str, tuple[tuple[np.ndarray, np.ndarray], list[tuple[np.ndarray, np.ndarray]]]]]:
+) -> tuple[
+    np.ndarray,
+    dict[
+        str, tuple[tuple[np.ndarray, np.ndarray], list[tuple[np.ndarray, np.ndarray]]]
+    ],
+]:
     with np.load(path, allow_pickle=False) as data:
         parameter_values = data["parameter_values"]
         points_by_component = {}
         for component in COMPONENTS:
             truth_points = (data[f"{component}_truth_x"], data[f"{component}_truth_y"])
             model_points = [
-                (data[f"{component}_model_{model_idx}_x"], data[f"{component}_model_{model_idx}_y"])
+                (
+                    data[f"{component}_model_{model_idx}_x"],
+                    data[f"{component}_model_{model_idx}_y"],
+                )
                 for model_idx in range(n_models)
             ]
             points_by_component[component] = (truth_points, model_points)
@@ -489,9 +676,13 @@ def safe_filename_label(label: str) -> str:
     return safe.strip("_") or "plot"
 
 
-def individual_output_path(output: Path, component: str, label: str, n_components: int) -> Path:
+def individual_output_path(
+    output: Path, component: str, label: str, n_components: int
+) -> Path:
     suffix = f"_{component}" if n_components > 1 else ""
-    return output.with_name(f"{output.stem}{suffix}_{safe_filename_label(label)}{output.suffix}")
+    return output.with_name(
+        f"{output.stem}{suffix}_{safe_filename_label(label)}{output.suffix}"
+    )
 
 
 def style_bifurcation_axis(
@@ -524,7 +715,9 @@ def plot_single(
 ) -> None:
     fig, ax = plt.subplots(figsize=(16, 5.0), dpi=dpi)
     ax.scatter(points[0], points[1], s=point_size, c="black", alpha=alpha, linewidths=0)
-    ax.set_title(f"{label} - {regime.family} {regime.name}", fontsize=14, fontweight="semibold")
+    ax.set_title(
+        f"{label} - {regime.family} {regime.name}", fontsize=14, fontweight="semibold"
+    )
     style_bifurcation_axis(ax, regime, parameter_values, component, show_ylabel=True)
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -559,9 +752,18 @@ def plot_combined(
     points = [truth_points, *model_points]
 
     for ax, label, point_pair in zip(axes_flat, labels, points):
-        ax.scatter(point_pair[0], point_pair[1], s=point_size, c="black", alpha=alpha, linewidths=0)
+        ax.scatter(
+            point_pair[0],
+            point_pair[1],
+            s=point_size,
+            c="black",
+            alpha=alpha,
+            linewidths=0,
+        )
         ax.set_title(label, fontsize=13)
-        style_bifurcation_axis(ax, regime, parameter_values, component, show_ylabel=True)
+        style_bifurcation_axis(
+            ax, regime, parameter_values, component, show_ylabel=True
+        )
 
     fig.suptitle(
         f"{regime.family}: {regime.name} bifurcation comparison",
@@ -578,7 +780,9 @@ def write_plots(
     output: Path,
     regime: Regime,
     parameter_values: np.ndarray,
-    points_by_component: dict[str, tuple[tuple[np.ndarray, np.ndarray], list[tuple[np.ndarray, np.ndarray]]]],
+    points_by_component: dict[
+        str, tuple[tuple[np.ndarray, np.ndarray], list[tuple[np.ndarray, np.ndarray]]]
+    ],
     labels: list[str],
     components: list[str],
     point_size: float,
@@ -607,7 +811,9 @@ def write_plots(
         all_labels = ["Ground Truth", *labels]
         all_points = [truth_points, *model_points]
         for label, points in zip(all_labels, all_points):
-            single_output = individual_output_path(output, component, label, n_components)
+            single_output = individual_output_path(
+                output, component, label, n_components
+            )
             plot_single(
                 output=single_output,
                 regime=regime,
@@ -637,7 +843,9 @@ def main() -> None:
         list_regimes_and_exit()
         return
     if args.context_steps <= 0 or args.forecast_steps <= 2:
-        raise ValueError("--context-steps must be positive and --forecast-steps must be > 2")
+        raise ValueError(
+            "--context-steps must be positive and --forecast-steps must be > 2"
+        )
     if args.rollouts <= 0:
         raise ValueError("--rollouts must be positive")
     if args.model_labels is not None and len(args.model_labels) != len(args.model_runs):
@@ -651,12 +859,20 @@ def main() -> None:
     components = list(dict.fromkeys(args.components))
     parameter_values = parameter_values_from_args(args, regime)
     labels = args.model_labels or [path.name for path in args.model_runs]
-    cache_path = args.cache if args.cache is not None else args.output.with_suffix(".npz")
+    cache_path = (
+        args.cache if args.cache is not None else args.output.with_suffix(".npz")
+    )
     expected_metadata = cache_metadata(args, regime)
 
-    if cache_path.exists() and not args.force_recompute and cache_matches(cache_path, expected_metadata):
+    if (
+        cache_path.exists()
+        and not args.force_recompute
+        and cache_matches(cache_path, expected_metadata)
+    ):
         print(f"Using cached bifurcation points: {cache_path.resolve()}")
-        parameter_values, points_by_component = load_points_cache(cache_path, len(args.model_runs))
+        parameter_values, points_by_component = load_points_cache(
+            cache_path, len(args.model_runs)
+        )
         written = write_plots(
             output=args.output,
             regime=regime,
@@ -682,15 +898,50 @@ def main() -> None:
         )
 
     device = configure_runtime(args)
-    set_repo_root(args.repo_root)
     models = []
-    for run_dir in args.model_runs:
-        model, forecaster, config, arch, checkpoint_path = load_model(run_dir, device)
-        print(
-            f"Loaded {run_dir} from {checkpoint_path.name}; "
-            f"phi_dim={arch['phi_dim']}, experts={arch['Experts']}"
-        )
-        models.append((model, forecaster, config, arch, checkpoint_path))
+    run_types = [
+        detect_model_type(run_dir, args.model_type) for run_dir in args.model_runs
+    ]
+    if any(run_type == "dynamix" for run_type in run_types):
+        if args.repo_root is None:
+            raise ValueError("--repo-root is required for DynaMix model runs")
+        set_repo_root(args.repo_root)
+
+    for run_dir, run_type in zip(args.model_runs, run_types):
+        if run_type == "alrnn":
+            model, metrics, model_path = load_alrnn_model(run_dir, device)
+            run_args = metrics.get("args", {})
+            print(
+                f"Loaded ALRNN {run_dir} from {model_path.name}; "
+                f"phi_dim={model.phi_dim}, M={model.M}, P={model.P}, "
+                f"train_phi_values={run_args.get('train_phi_values')}"
+            )
+            models.append(
+                {
+                    "type": "alrnn",
+                    "model": model,
+                    "metrics": metrics,
+                    "checkpoint_path": model_path,
+                }
+            )
+        else:
+            model, forecaster, config, arch, checkpoint_path = load_model(
+                run_dir, device
+            )
+            print(
+                f"Loaded DynaMix {run_dir} from {checkpoint_path.name}; "
+                f"phi_dim={arch['phi_dim']}, experts={arch['Experts']}"
+            )
+            models.append(
+                {
+                    "type": "dynamix",
+                    "model": model,
+                    "forecaster": forecaster,
+                    "config": config,
+                    "arch": arch,
+                    "checkpoint_path": checkpoint_path,
+                }
+            )
 
     print(
         f"Sweeping {len(parameter_values)} values for {regime.name}: "
@@ -721,12 +972,11 @@ def main() -> None:
             truth_peaks[component].append(local_maxima(truth_slice[:, component_idx]))
 
         phi_value = normalized_phi(regime, float(raw_parameter))
-        for model_idx, (model, forecaster, *_rest) in enumerate(models):
+        for model_idx, loaded_model in enumerate(models):
             rollout_peaks = {component: [] for component in COMPONENTS}
             for _ in range(args.rollouts):
-                pred = forecast_model(
-                    model=model,
-                    forecaster=forecaster,
+                pred = forecast_loaded_model(
+                    loaded=loaded_model,
                     trajectory=trajectory,
                     phi_value=phi_value,
                     context_steps=args.context_steps,
@@ -734,15 +984,21 @@ def main() -> None:
                     device=device,
                 )
                 for component, component_idx in COMPONENTS.items():
-                    rollout_peaks[component].append(local_maxima(pred[:, component_idx]))
+                    rollout_peaks[component].append(
+                        local_maxima(pred[:, component_idx])
+                    )
             for component in COMPONENTS:
                 peaks = rollout_peaks[component]
                 model_peaks[component][model_idx].append(
                     np.concatenate(peaks) if peaks else np.empty(0)
                 )
 
-    points_by_component = collect_points_by_component(parameter_values, truth_peaks, model_peaks)
-    save_points_cache(cache_path, expected_metadata, parameter_values, points_by_component)
+    points_by_component = collect_points_by_component(
+        parameter_values, truth_peaks, model_peaks
+    )
+    save_points_cache(
+        cache_path, expected_metadata, parameter_values, points_by_component
+    )
     print(f"Saved cache: {cache_path.resolve()}")
 
     written = write_plots(
