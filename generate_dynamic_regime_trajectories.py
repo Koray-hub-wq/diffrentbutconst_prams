@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -85,6 +85,27 @@ def normalize_phi(phi_raw: Array, start: float, end: float, boundary: float) -> 
     return (phi_raw - boundary) / scale
 
 
+def regime_with_phi_range(
+    regime: Regime, phi_start: float | None, phi_end: float | None
+) -> Regime:
+    scale = max(
+        abs(regime.start - regime.boundary), abs(regime.end - regime.boundary), 1e-8
+    )
+    return replace(
+        regime,
+        start=(
+            float(regime.boundary + phi_start * scale)
+            if phi_start is not None
+            else regime.start
+        ),
+        end=(
+            float(regime.boundary + phi_end * scale)
+            if phi_end is not None
+            else regime.end
+        ),
+    )
+
+
 def rossler_rhs(t: float, x: Array, p: float, *, a: float, b: float) -> Array:
     return np.array(
         [
@@ -96,12 +117,126 @@ def rossler_rhs(t: float, x: Array, p: float, *, a: float, b: float) -> Array:
     )
 
 
+def rossler_a_rhs(t: float, x: Array, p: float, *, b: float, c: float) -> Array:
+    a = p
+    return np.array(
+        [
+            -x[1] - x[2],
+            x[0] + a * x[1],
+            b + x[2] * (x[0] - c),
+        ],
+        dtype=np.float64,
+    )
+
+
 def lorenz_rhs(t: float, x: Array, p: float, *, sigma: float, beta: float) -> Array:
     return np.array(
         [
             sigma * (x[1] - x[0]),
             x[0] * (p - x[2]) - x[1],
             x[0] * x[1] - beta * x[2],
+        ],
+        dtype=np.float64,
+    )
+
+
+def thomas_rhs(t: float, x: Array, p: float) -> Array:
+    b = p
+    return np.array(
+        [
+            np.sin(x[1]) - b * x[0],
+            np.sin(x[2]) - b * x[1],
+            np.sin(x[0]) - b * x[2],
+        ],
+        dtype=np.float64,
+    )
+
+
+def dadras_rhs(
+    t: float,
+    x: Array,
+    p: float,
+    *,
+    a: float,
+    b: float,
+    c: float,
+    d: float,
+) -> Array:
+    e = p
+    return np.array(
+        [
+            x[1] - a * x[0] + b * x[1] * x[2],
+            c * x[1] - x[0] * x[2] + x[2],
+            d * x[0] * x[1] - e * x[2],
+        ],
+        dtype=np.float64,
+    )
+
+
+def burke_shaw_rhs(t: float, x: Array, p: float, *, sigma: float) -> Array:
+    nu = p
+    return np.array(
+        [
+            -sigma * (x[0] + x[1]),
+            -x[1] - sigma * x[0] * x[2],
+            sigma * x[0] * x[1] + nu,
+        ],
+        dtype=np.float64,
+    )
+
+
+def tsucs1_rhs(
+    t: float,
+    x: Array,
+    p: float,
+    *,
+    a: float,
+    b: float,
+    c: float,
+    d: float,
+) -> Array:
+    e = p
+    return np.array(
+        [
+            a * (x[1] - x[0]) + c * x[0] * x[2],
+            e * x[1] - x[0] * x[2],
+            b * x[2] + x[0] * x[1] - d * x[0] * x[0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def shimizu_morioka_a_rhs(t: float, x: Array, p: float, *, b: float) -> Array:
+    a = p
+    return np.array(
+        [
+            x[1],
+            x[0] - a * x[1] - x[0] * x[2],
+            x[0] * x[0] - b * x[2],
+        ],
+        dtype=np.float64,
+    )
+
+
+def shimizu_morioka_b_rhs(t: float, x: Array, p: float, *, a: float) -> Array:
+    b = p
+    return np.array(
+        [
+            x[1],
+            x[0] - a * x[1] - x[0] * x[2],
+            x[0] * x[0] - b * x[2],
+        ],
+        dtype=np.float64,
+    )
+
+
+def rikitake_rhs(t: float, x: Array, p: float, *, a: float) -> Array:
+    mu = p
+    return np.array(
+        [
+            -mu * x[0] + x[2] * x[1],
+            -mu * x[1] + (x[2] - a) * x[0],
+            1.0 - x[0] * x[1],
         ],
         dtype=np.float64,
     )
@@ -159,7 +294,15 @@ def halvorsen_rhs(t: float, x: Array, p: float, *, drive: float) -> Array:
 
 RHS: dict[str, RhsFn] = {
     "rossler": rossler_rhs,
+    "rossler_a": rossler_a_rhs,
     "lorenz": lorenz_rhs,
+    "thomas": thomas_rhs,
+    "dadras": dadras_rhs,
+    "burke_shaw": burke_shaw_rhs,
+    "tsucs1": tsucs1_rhs,
+    "shimizu_morioka_a": shimizu_morioka_a_rhs,
+    "shimizu_morioka_b": shimizu_morioka_b_rhs,
+    "rikitake": rikitake_rhs,
     "forced_duffing": forced_duffing_rhs,
     "forced_vdp": forced_vdp_rhs,
     "halvorsen": halvorsen_rhs,
@@ -285,6 +428,132 @@ def default_regimes() -> list[Regime]:
             params={"sigma": sigma, "beta": beta},
             init_center=(1.0, 1.0, 40.0),
             init_scale=(3.0, 3.0, 5.0),
+        ),
+        Regime(
+            name="rossler_a_005_to_035",
+            family="Rossler",
+            parameter="a",
+            boundary=0.20,
+            start=0.05,
+            end=0.35,
+            transition_type="wide_a_sweep",
+            description="Rossler sweep over a wider a interval with fixed b=0.2 and c=5.7.",
+            rhs_key="rossler_a",
+            params={"b": 0.2, "c": 5.7},
+            init_center=(0.0, -5.0, 0.5),
+            init_scale=(1.0, 1.0, 0.2),
+        ),
+        Regime(
+            name="thomas_b_004_to_023",
+            family="Thomas",
+            parameter="b",
+            boundary=0.135,
+            start=0.04,
+            end=0.23,
+            transition_type="damping_sweep",
+            description="Thomas cyclically symmetric attractor with increasing damping parameter b.",
+            rhs_key="thomas",
+            params={},
+            init_center=(1.0, -1.0, 1.0),
+            init_scale=(0.4, 0.4, 0.4),
+        ),
+        Regime(
+            name="dadras_e_49_to_64",
+            family="Dadras",
+            parameter="e",
+            boundary=5.65,
+            start=4.9,
+            end=6.4,
+            transition_type="parameter_sweep",
+            description="Dadras flow with e sweep and fixed a=2.6, b=2.7, c=2.8, d=3.0.",
+            rhs_key="dadras",
+            params={"a": 2.6, "b": 2.7, "c": 2.8, "d": 3.0},
+            init_center=(1.0, 1.0, 1.0),
+            init_scale=(0.4, 0.4, 0.4),
+        ),
+        Regime(
+            name="burke_shaw_nu_15_to_30",
+            family="BurkeShaw",
+            parameter="nu",
+            boundary=2.25,
+            start=1.5,
+            end=3.0,
+            transition_type="parameter_sweep",
+            description="Burke-Shaw flow with fixed sigma=10 and increasing nu.",
+            rhs_key="burke_shaw",
+            params={"sigma": 10.0},
+            init_center=(1.0, 0.0, 0.0),
+            init_scale=(0.3, 0.3, 0.3),
+        ),
+        Regime(
+            name="tsucs1_e_18_to_20",
+            family="TSUCS1",
+            parameter="e",
+            boundary=19.0,
+            start=18.0,
+            end=20.0,
+            transition_type="parameter_sweep",
+            description="TSUCS1 flow with e sweep from 18.0 to 20.0.",
+            rhs_key="tsucs1",
+            params={"a": 40.0, "b": 0.833, "c": 0.5, "d": 0.65},
+            init_center=(1.0, 1.0, 1.0),
+            init_scale=(0.3, 0.3, 0.3),
+        ),
+        Regime(
+            name="tsucs1_e_20_to_245",
+            family="TSUCS1",
+            parameter="e",
+            boundary=22.25,
+            start=20.0,
+            end=24.5,
+            transition_type="parameter_sweep",
+            description="TSUCS1 flow with e sweep from 20.0 to 24.5.",
+            rhs_key="tsucs1",
+            params={"a": 40.0, "b": 0.833, "c": 0.5, "d": 0.65},
+            init_center=(1.0, 1.0, 1.0),
+            init_scale=(0.3, 0.3, 0.3),
+        ),
+        Regime(
+            name="shimizu_morioka_a_085_to_113",
+            family="ShimizuMorioka",
+            parameter="a",
+            boundary=0.95,
+            start=0.85,
+            end=1.13,
+            transition_type="tipping_sweep",
+            description="Shimizu-Morioka sweep in a with fixed b=0.5 and tipping reference near a=0.95.",
+            rhs_key="shimizu_morioka_a",
+            params={"b": 0.5},
+            init_center=(0.5, 0.0, 0.5),
+            init_scale=(0.2, 0.2, 0.2),
+        ),
+        Regime(
+            name="shimizu_morioka_b_05_to_105",
+            family="ShimizuMorioka",
+            parameter="b",
+            boundary=0.75,
+            start=0.5,
+            end=1.05,
+            transition_type="tipping_sweep",
+            description="Shimizu-Morioka sweep in b with fixed a=0.85 and tipping reference near b=0.75.",
+            rhs_key="shimizu_morioka_b",
+            params={"a": 0.85},
+            init_center=(0.5, 0.0, 0.5),
+            init_scale=(0.2, 0.2, 0.2),
+        ),
+        Regime(
+            name="rikitake_mu_10_to_45",
+            family="Rikitake",
+            parameter="mu",
+            boundary=2.2,
+            start=1.0,
+            end=4.5,
+            transition_type="tipping_sweep",
+            description="Rikitake dynamo sweep in mu with fixed a=5.0 and tipping reference near mu=2.2.",
+            rhs_key="rikitake",
+            params={"a": 5.0},
+            init_center=(0.2, 0.2, 1.0),
+            init_scale=(0.2, 0.2, 0.2),
         ),
         Regime(  # eigentlicher standard 1.4 to 2.09
             name="halvorsen_a_chaotic_to_periodic",
@@ -430,6 +699,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--n-steps", type=int, default=100000)
     parser.add_argument("--dt", type=float, default=0.01)
+    parser.add_argument(
+        "--phi-start",
+        type=float,
+        default=None,
+        help=(
+            "Optional normalized phi value at the beginning of the linear sweep. "
+            "If omitted, the regime's raw start parameter is used unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--phi-end",
+        type=float,
+        default=None,
+        help=(
+            "Optional normalized phi value at the end of the linear sweep. "
+            "If omitted, the regime's raw end parameter is used unchanged."
+        ),
+    )
     parser.add_argument("--trajectories-per-regime", type=int, default=8)
     parser.add_argument("--seed", type=int, default=8)
     parser.add_argument("--rtol", type=float, default=1e-6)
@@ -484,6 +771,14 @@ def main() -> None:
             raise ValueError(f"Unknown regime names: {sorted(missing)}")
     if not regimes:
         raise ValueError("No regimes selected.")
+    if (
+        args.parameter_mode == "linear"
+        and args.phi_start is not None
+        and args.phi_start == args.phi_end
+    ):
+        raise ValueError(
+            "--phi-start and --phi-end must differ for --parameter-mode linear"
+        )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -496,6 +791,14 @@ def main() -> None:
     for regime_idx, regime in enumerate(
         tqdm(regimes, desc="Simulating dynamic regimes")
     ):
+        if args.parameter_mode == "linear" and (
+            args.phi_start is not None or args.phi_end is not None
+        ):
+            regime = regime_with_phi_range(regime, args.phi_start, args.phi_end)
+            if regime.start == regime.end:
+                raise ValueError(
+                    f"Resolved start and end parameters are identical for {regime.name}."
+                )
         traj, phi_one, phi_raw_one = simulate_regime(
             regime,
             n_steps=args.n_steps,
