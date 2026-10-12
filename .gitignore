@@ -7,6 +7,8 @@
 # Track source and notebooks.
 !*.py
 !*.ipynb
+!*.sh
+
 
 # Track this ignore file.
 !.gitignore
