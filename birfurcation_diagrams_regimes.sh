@@ -16,7 +16,7 @@ cd ..
 cd diffrentbutconst_prams
 
 GPU_ID=${1:-${GPU_ID:-0}}
-REGIMES=("dadras_e_49_to_64" "tsucs1_e_20_to_245")
+REGIMES=("dadras" "tsucs1")
 
 for REGIME in "${REGIMES[@]}"; do
   echo "========================================"
