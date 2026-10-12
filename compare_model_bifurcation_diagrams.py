@@ -20,6 +20,7 @@ python compare_model_bifurcation_diagrams.py \
 from __future__ import annotations
 
 import argparse
+import inspect
 import importlib.util
 import json
 import math
@@ -98,19 +99,43 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model-type",
-        choices=("auto", "dynamix", "alrnn"),
+        choices=("auto", "dynamix", "alrnn", "pretrained"),
         default="auto",
         help=(
             "Model run format. 'auto' treats runs with model.pt and metrics.json "
-            "as single ALRNN runs, otherwise DynaMix runs."
+            "as single ALRNN runs, otherwise DynaMix runs. Use 'pretrained' with "
+            "--pretrained-model-names for original DynaMix HF-style pretrained models."
         ),
     )
     parser.add_argument(
         "--model-runs",
         nargs="+",
         type=Path,
-        required=True,
+        default=[],
         help="One or more trained run directories containing config.json/checkpoints.",
+    )
+    parser.add_argument(
+        "--pretrained-repo-root",
+        type=Path,
+        default=None,
+        help="Original DynaMix repo root used for load_hf_model pretrained models.",
+    )
+    parser.add_argument(
+        "--pretrained-model-names",
+        nargs="+",
+        default=[],
+        help="One or more pretrained model names, e.g. dynamix-3d-alrnn-v1.0.",
+    )
+    parser.add_argument(
+        "--pretrained-forecast-preprocessing-method",
+        default=None,
+        help="Optional preprocessing_method passed to the pretrained forecaster if supported.",
+    )
+    parser.add_argument(
+        "--pretrained-standardize",
+        choices=("none", "true", "false"),
+        default="none",
+        help="Optional standardize argument passed to the pretrained forecaster if supported.",
     )
     parser.add_argument(
         "--model-labels",
@@ -446,6 +471,64 @@ def forecast_model(
     return pred.detach().cpu().numpy().astype(np.float32)[:, 0, :]
 
 
+def purge_dynamix_modules() -> None:
+    for name in list(sys.modules):
+        if name == "dynamix" or name.startswith("dynamix."):
+            del sys.modules[name]
+
+
+def put_repo_src_first(repo_root: Path) -> None:
+    src = repo_root.resolve() / "src"
+    if not src.exists():
+        raise FileNotFoundError(f"Expected DynaMix src directory at {src}")
+    src_str = str(src)
+    while src_str in sys.path:
+        sys.path.remove(src_str)
+    sys.path.insert(0, src_str)
+
+
+def load_pretrained_model(
+    repo_root: Path,
+    model_name: str,
+    device: str,
+) -> tuple[Any, Any]:
+    purge_dynamix_modules()
+    put_repo_src_first(repo_root)
+    from dynamix.model.forecaster import DynaMixForecaster
+    from dynamix.utilities.utilities import load_hf_model
+
+    model = load_hf_model(model_name).to(device)
+    model.eval()
+    return model, DynaMixForecaster(model)
+
+
+def optional_bool(value: str) -> bool | None:
+    if value == "none":
+        return None
+    return value == "true"
+
+
+@torch.no_grad()
+def forecast_pretrained_model(
+    forecaster: Any,
+    trajectory: np.ndarray,
+    context_steps: int,
+    forecast_steps: int,
+    device: str,
+    preprocessing_method: str | None,
+    standardize: bool | None,
+) -> np.ndarray:
+    context = torch.tensor(trajectory[:context_steps, None, :], dtype=torch.float32, device=device)
+    kwargs: dict[str, Any] = {}
+    forecast_params = inspect.signature(forecaster.forecast).parameters
+    if preprocessing_method is not None and "preprocessing_method" in forecast_params:
+        kwargs["preprocessing_method"] = preprocessing_method
+    if standardize is not None and "standardize" in forecast_params:
+        kwargs["standardize"] = standardize
+    pred = forecaster.forecast(context, forecast_steps, **kwargs)
+    return pred.detach().cpu().numpy().astype(np.float32)[:, 0, :]
+
+
 def detect_model_type(run_dir: Path, requested_type: str) -> str:
     if requested_type != "auto":
         return requested_type
@@ -531,6 +614,16 @@ def forecast_loaded_model(
             forecast_steps=forecast_steps,
             device=device,
         )
+    if loaded["type"] == "pretrained":
+        return forecast_pretrained_model(
+            forecaster=loaded["forecaster"],
+            trajectory=trajectory,
+            context_steps=context_steps,
+            forecast_steps=forecast_steps,
+            device=device,
+            preprocessing_method=loaded["preprocessing_method"],
+            standardize=loaded["standardize"],
+        )
     return forecast_model(
         model=loaded["model"],
         forecaster=loaded["forecaster"],
@@ -596,6 +689,12 @@ def cache_metadata(args: argparse.Namespace, regime: Regime) -> dict[str, Any]:
         "regime": regime.name,
         "model_type": args.model_type,
         "model_runs": [str(path) for path in args.model_runs],
+        "pretrained_repo_root": (
+            str(args.pretrained_repo_root) if args.pretrained_repo_root is not None else None
+        ),
+        "pretrained_model_names": list(args.pretrained_model_names),
+        "pretrained_forecast_preprocessing_method": args.pretrained_forecast_preprocessing_method,
+        "pretrained_standardize": args.pretrained_standardize,
         "num_parameters": args.num_parameters,
         "parameter_min": args.parameter_min,
         "parameter_max": args.parameter_max,
@@ -854,8 +953,17 @@ def main() -> None:
         )
     if args.rollouts <= 0:
         raise ValueError("--rollouts must be positive")
-    if args.model_labels is not None and len(args.model_labels) != len(args.model_runs):
-        raise ValueError("--model-labels must have the same length as --model-runs")
+    n_models_requested = len(args.model_runs) + len(args.pretrained_model_names)
+    if n_models_requested == 0:
+        raise ValueError("Pass at least one --model-runs entry or --pretrained-model-names entry")
+    if args.model_type == "pretrained" and args.model_runs:
+        raise ValueError("Use --pretrained-model-names, not --model-runs, with --model-type pretrained")
+    if args.pretrained_model_names and args.pretrained_repo_root is None:
+        raise ValueError("--pretrained-repo-root is required with --pretrained-model-names")
+    if args.model_labels is not None and len(args.model_labels) != n_models_requested:
+        raise ValueError(
+            "--model-labels must have the same length as local runs plus pretrained models"
+        )
 
     regime = regime_by_name(args.regime)
     truth_steps = args.forecast_steps if args.truth_steps is None else args.truth_steps
@@ -864,7 +972,10 @@ def main() -> None:
     n_steps = args.context_steps + max(args.forecast_steps, truth_steps)
     components = list(dict.fromkeys(args.components))
     parameter_values = parameter_values_from_args(args, regime)
-    labels = args.model_labels or [path.name for path in args.model_runs]
+    default_labels = [path.name for path in args.model_runs] + [
+        f"pretrained:{name}" for name in args.pretrained_model_names
+    ]
+    labels = args.model_labels or default_labels
     cache_path = (
         args.cache if args.cache is not None else args.output.with_suffix(".npz")
     )
@@ -877,7 +988,7 @@ def main() -> None:
     ):
         print(f"Using cached bifurcation points: {cache_path.resolve()}")
         parameter_values, points_by_component = load_points_cache(
-            cache_path, len(args.model_runs)
+            cache_path, n_models_requested
         )
         written = write_plots(
             output=args.output,
@@ -905,8 +1016,9 @@ def main() -> None:
 
     device = configure_runtime(args)
     models = []
+    local_model_type = "auto" if args.model_type == "pretrained" else args.model_type
     run_types = [
-        detect_model_type(run_dir, args.model_type) for run_dir in args.model_runs
+        detect_model_type(run_dir, local_model_type) for run_dir in args.model_runs
     ]
     if any(run_type == "dynamix" for run_type in run_types):
         if args.repo_root is None:
@@ -948,6 +1060,30 @@ def main() -> None:
                     "checkpoint_path": checkpoint_path,
                 }
             )
+
+    for model_name in args.pretrained_model_names:
+        if args.pretrained_repo_root is None:
+            raise ValueError("--pretrained-repo-root is required for pretrained models")
+        model, forecaster = load_pretrained_model(
+            args.pretrained_repo_root,
+            model_name,
+            device,
+        )
+        print(
+            f"Loaded pretrained {model_name} from {args.pretrained_repo_root}; "
+            f"phi_dim={getattr(model, 'phi_dim', 0)}"
+        )
+        models.append(
+            {
+                "type": "pretrained",
+                "model": model,
+                "forecaster": forecaster,
+                "model_name": model_name,
+                "repo_root": args.pretrained_repo_root,
+                "preprocessing_method": args.pretrained_forecast_preprocessing_method,
+                "standardize": optional_bool(args.pretrained_standardize),
+            }
+        )
 
     print(
         f"Sweeping {len(parameter_values)} values for {regime.name}: "
