@@ -455,12 +455,14 @@ def forecast_model(
     )
     kwargs: dict[str, torch.Tensor] = {}
     if getattr(model, "phi_dim", 0) > 0:
-        kwargs["context_phi"] = torch.full(
-            (context_steps, 1, 1),
-            float(phi_value),
-            dtype=torch.float32,
-            device=device,
-        )
+        forecast_params = inspect.signature(forecaster.forecast).parameters
+        if "context_phi" in forecast_params:
+            kwargs["context_phi"] = torch.full(
+                (context_steps, 1, 1),
+                float(phi_value),
+                dtype=torch.float32,
+                device=device,
+            )
         kwargs["phi_future"] = torch.full(
             (forecast_steps, 1, 1),
             float(phi_value),
