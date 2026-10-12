@@ -3,10 +3,10 @@
 set -e  # Stoppt das Skript bei Fehlern
 
 # vor erstem run:
-# sed -i 's/\r$//' birfurcation_diagrams_dadras_e.sh
-# chmod +x birfurcation_diagrams_dadras_e.sh
+# sed -i 's/\r$//' birfurcation_diagrams_regimes.sh
+# chmod +x birfurcation_diagrams_regimes.sh
 # dann starten mit:
-# ./birfurcation_diagrams_dadras_e.sh
+# ./birfurcation_diagrams_regimes.sh
 
 cd ..
 cd DynaMix-python-b-tipping
