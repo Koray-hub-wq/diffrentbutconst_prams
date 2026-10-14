@@ -10,6 +10,7 @@ Faint vertical lines mark the constant parameter values represented in each
 model's training dataset. Dataset paths are followed from the run metadata;
 use --training-data-dirs to override moved datasets, or --no-training-markers
 to disable the lines. Marker discovery also runs when replotting cached points.
+Use --plot-only to require an existing cache and never recompute the sweep.
 
 Example:
 
@@ -250,10 +251,20 @@ def parse_args() -> argparse.Namespace:
             "path with .npz suffix. Existing compatible cache files are reused."
         ),
     )
-    parser.add_argument(
+    cache_mode = parser.add_mutually_exclusive_group()
+    cache_mode.add_argument(
         "--force-recompute",
         action="store_true",
         help="Ignore an existing cache and recompute the sweep.",
+    )
+    cache_mode.add_argument(
+        "--plot-only",
+        action="store_true",
+        help=(
+            "Only redraw an existing cache; never simulate, load model weights, or write "
+            "the cache. Requires matching regime and model order, but ignores current "
+            "simulation settings such as --num-parameters."
+        ),
     )
     parser.add_argument(
         "--training-data-dirs",
@@ -911,6 +922,32 @@ def cache_matches(path: Path, expected_metadata: dict[str, Any]) -> bool:
     return cached_metadata == expected_metadata
 
 
+def validate_plot_only_cache(path: Path, expected_metadata: dict[str, Any]) -> None:
+    if not path.is_file():
+        raise FileNotFoundError(f"--plot-only requires an existing cache: {path}")
+    with np.load(path, allow_pickle=False) as data:
+        cached = json.loads(str(data["metadata"].item()))
+    if cached.get("regime") != expected_metadata["regime"]:
+        raise ValueError(
+            f"Cache regime is {cached.get('regime')!r}; requested "
+            f"{expected_metadata['regime']!r}. No plots were written."
+        )
+    # Accept absolute/relative spellings of the same run without accepting a
+    # different model or model order, which would mislabel the cached panels.
+    def resolved_runs(metadata: dict[str, Any]) -> list[Path]:
+        return [Path(value).expanduser().resolve() for value in metadata.get("model_runs", [])]
+
+    if (
+        resolved_runs(cached) != resolved_runs(expected_metadata)
+        or cached.get("pretrained_model_names", []) != expected_metadata["pretrained_model_names"]
+    ):
+        raise ValueError(
+            "Cache models differ from the requested models or their order. "
+            "Pass --model-runs/--pretrained-model-names in the original cache order. "
+            "No plots were written."
+        )
+
+
 def save_points_cache(
     path: Path,
     metadata: dict[str, Any],
@@ -937,6 +974,7 @@ def save_points_cache(
 def load_points_cache(
     path: Path,
     n_models: int,
+    components: list[str] | None = None,
 ) -> tuple[
     np.ndarray,
     dict[
@@ -946,7 +984,7 @@ def load_points_cache(
     with np.load(path, allow_pickle=False) as data:
         parameter_values = data["parameter_values"]
         points_by_component = {}
-        for component in COMPONENTS:
+        for component in COMPONENTS if components is None else components:
             truth_points = (data[f"{component}_truth_x"], data[f"{component}_truth_y"])
             model_points = [
                 (
@@ -1185,14 +1223,20 @@ def main() -> None:
     )
     expected_metadata = cache_metadata(args, regime)
 
+    if args.plot_only:
+        validate_plot_only_cache(cache_path, expected_metadata)
+
     if (
-        cache_path.exists()
-        and not args.force_recompute
-        and cache_matches(cache_path, expected_metadata)
+        args.plot_only
+        or (
+            cache_path.exists()
+            and not args.force_recompute
+            and cache_matches(cache_path, expected_metadata)
+        )
     ):
         print(f"Using cached bifurcation points: {cache_path.resolve()}")
         parameter_values, points_by_component = load_points_cache(
-            cache_path, n_models_requested
+            cache_path, n_models_requested, components
         )
         written = write_plots(
             output=args.output,
