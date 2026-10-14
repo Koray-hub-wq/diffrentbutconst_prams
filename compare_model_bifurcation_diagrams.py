@@ -6,6 +6,11 @@ as the training-data generator, forecasts from the initial context with each
 model, caches local maxima for all three components, and plots selected
 components.
 
+Faint vertical lines mark the constant parameter values represented in each
+model's training dataset. Dataset paths are followed from the run metadata;
+use --training-data-dirs to override moved datasets, or --no-training-markers
+to disable the lines. Marker discovery also runs when replotting cached points.
+
 Example:
 
 python compare_model_bifurcation_diagrams.py \
@@ -250,6 +255,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Ignore an existing cache and recompute the sweep.",
     )
+    parser.add_argument(
+        "--training-data-dirs",
+        nargs="+",
+        type=Path,
+        help=(
+            "Override training dataset locations, one directory per --model-runs entry. "
+            "Otherwise follow data_path/data_dir in config.json or metrics.json. "
+            "Use this when datasets have moved since training."
+        ),
+    )
+    parser.add_argument(
+        "--no-training-markers",
+        action="store_true",
+        help="Disable the faint vertical lines marking training parameter values.",
+    )
     return parser.parse_args()
 
 
@@ -295,6 +315,173 @@ def normalized_phi(regime: Regime, raw_parameter: float) -> float:
             regime.boundary,
         )[0]
     )
+
+
+def find_training_data_dir(
+    reference: str, run_dir: Path, repo_root: Path | None
+) -> Path:
+    # Training paths are normally relative to the repository, not the run folder.
+    path = Path(reference.replace("\\", "/")).expanduser()
+    if path.suffix.lower() in (".npy", ".json"):
+        path = path.parent
+    bases = ([repo_root] if repo_root is not None else []) + [
+        run_dir, *run_dir.resolve().parents, Path.cwd(), Path(__file__).resolve().parent
+    ]
+    candidates = [path] if path.is_absolute() else [base / path for base in bases]
+    for candidate in candidates:
+        for directory in (candidate, candidate / "windows"):
+            if (directory / "metadata.json").is_file():
+                return directory.resolve()
+    raise FileNotFoundError(
+        f"Cannot locate training metadata for {reference!r}. "
+        "Pass --training-data-dirs with the current dataset locations."
+    )
+
+
+def training_parameter_values(
+    data_dir: Path,
+    metadata: dict[str, Any],
+    regime: Regime,
+    settings: dict[str, Any],
+    model_type: str,
+) -> np.ndarray:
+    """Resolve actual constant training values, applying model-side selection."""
+    regimes = metadata.get("regimes", [])
+    matches = [item for item in regimes if item.get("name") == regime.name]
+    if not matches:
+        raise ValueError(f"Training dataset has no metadata for regime {regime.name!r}")
+    dataset_regime = matches[0]
+    boundary = float(dataset_regime["boundary"])
+    scale = max(
+        abs(float(dataset_regime["start"]) - boundary),
+        abs(float(dataset_regime["end"]) - boundary),
+        1e-8,
+    )
+    parameter_filter = metadata.get("parameter_filter", {})
+    values = None
+    per_series = False
+    names_path = None
+    # Prefer the actual training windows. The arrays can be memory-mapped so no
+    # trajectory/state data need to be loaded, even when replotting a cache.
+    array_names = (
+        ("phi_raw.npy", "trajectory_phi_raw_constants.npy", "trajectory_phi_raw.npy")
+        if model_type == "dynamix"
+        else ("trajectory_phi_raw_constants.npy", "trajectory_phi_raw.npy")
+    )
+    for name in array_names:
+        path = data_dir / name
+        if not path.is_file():
+            continue
+        array = np.load(path, mmap_mode="r", allow_pickle=False)
+        if name.endswith("constants.npy"):
+            values = np.asarray(array, dtype=np.float64).reshape(-1)
+        else:
+            if array.ndim != 3 or array.shape[2] != 1:
+                raise ValueError(f"Unexpected parameter array shape in {path}: {array.shape}")
+            # Window arrays are (time, windows, 1); trajectories are (series, time, 1).
+            by_series = array[:, :, 0].T if name == "phi_raw.npy" else array[:, :, 0]
+            values = np.asarray(by_series[:, 0], dtype=np.float64)
+            for start in range(0, len(values), 1024):
+                block = by_series[start : start + 1024]
+                if not np.all(np.isclose(block, values[start : start + 1024, None],
+                                         atol=1e-6, rtol=0.0)):
+                    raise ValueError("Training parameters vary over time; discrete markers are unavailable")
+        per_series = True
+        names_path = data_dir / (
+            "window_regime_names.npy" if name == "phi_raw.npy" else "trajectory_regime_names.npy"
+        )
+        break
+
+    if values is None:
+        if len(regimes) != 1:
+            raise ValueError("Multiple training regimes require parameter arrays with regime labels")
+        raw_values = parameter_filter.get("selected_raw_parameter_values")
+        if raw_values is not None:
+            values = np.asarray(raw_values, dtype=np.float64)
+        else:
+            phi_values = parameter_filter.get("selected_phi_values")
+            if phi_values is None:
+                phi_values = metadata.get("requested_phi_values")
+            if phi_values is None:
+                raise ValueError("No constant training parameter values found in dataset")
+            values = boundary + np.asarray(phi_values, dtype=np.float64) * scale
+
+    keep = np.ones(values.shape, dtype=bool)
+    if per_series and names_path is not None and names_path.is_file():
+        names = np.load(names_path, allow_pickle=False).astype(str).reshape(-1)
+        if names.shape != values.shape:
+            raise ValueError("Training regime labels do not match the parameter array")
+        keep &= names == regime.name
+    elif len(regimes) != 1:
+        raise ValueError("Cannot associate training parameter values with the plotted regime")
+
+    if model_type == "alrnn" and settings.get("multi_trajectory") is False:
+        if not per_series:
+            raise ValueError("Single-trajectory ALRNN training requires per-trajectory parameter arrays")
+        selected = np.zeros(values.shape, dtype=bool)
+        trajectory_id = int(settings.get("trajectory_id", 0))
+        if not 0 <= trajectory_id < len(values):
+            raise ValueError("ALRNN trajectory_id is outside the training dataset")
+        selected[trajectory_id] = True
+        keep &= selected
+    else:
+        requested_phi = settings.get("train_phi_values")
+        requested_raw = settings.get("train_raw_parameter_values")
+        if requested_phi is not None:
+            phi = (values - boundary) / scale
+            keep &= np.any(np.isclose(phi[:, None], requested_phi, atol=1e-5), axis=1)
+        if requested_raw is not None:
+            keep &= np.any(np.isclose(values[:, None], requested_raw, atol=1e-5), axis=1)
+
+    values = values[keep]
+    if not np.all(np.isfinite(values)):
+        raise ValueError("Training parameter values contain non-finite entries")
+    if not len(values):
+        raise ValueError("No training parameters remain for this regime and model selection")
+    # Collapse float32 rounding duplicates without merging distinct sampled values.
+    unique = np.unique(values)
+    return unique[np.r_[True, ~np.isclose(unique[1:], unique[:-1], atol=1e-7, rtol=0.0)]]
+
+
+def resolve_training_parameters(args: argparse.Namespace, regime: Regime) -> list[np.ndarray]:
+    markers = [np.empty(0) for _ in args.model_runs + args.pretrained_model_names]
+    if args.no_training_markers:
+        return markers
+    for index, run_dir in enumerate(args.model_runs):
+        try:
+            model_type = detect_model_type(run_dir, args.model_type)
+            filename = "metrics.json" if model_type == "alrnn" else "config.json"
+            run_metadata = json.loads((run_dir / filename).read_text(encoding="utf-8-sig"))
+            settings = run_metadata.get("args", run_metadata)
+            if args.training_data_dirs is not None:
+                data_dir = args.training_data_dirs[index].expanduser().resolve()
+            else:
+                reference = settings.get("data_path") or settings.get("data_dir")
+                if not reference:
+                    raise ValueError(f"No training dataset reference in {filename}")
+                data_dir = find_training_data_dir(reference, run_dir, args.repo_root)
+            metadata = json.loads((data_dir / "metadata.json").read_text(encoding="utf-8-sig"))
+            markers[index] = training_parameter_values(data_dir, metadata, regime, settings, model_type)
+            print(
+                f"Training parameters for {run_dir.name}: "
+                f"{np.array2string(markers[index], precision=6)}; dataset={data_dir}"
+            )
+        except (OSError, ValueError, KeyError, TypeError, IndexError) as exc:
+            print(f"Warning: no training markers for {run_dir.name}: {exc}")
+    return markers
+
+
+def add_training_markers(ax, values: np.ndarray, parameter_values: np.ndarray) -> None:
+    low, high = float(np.min(parameter_values)), float(np.max(parameter_values))
+    visible = values[(values >= low - 1e-7) & (values <= high + 1e-7)]
+    for index, value in enumerate(visible):
+        ax.axvline(
+            float(np.clip(value, low, high)), color="tab:blue", alpha=0.22,
+            linewidth=1.1, zorder=0,
+            label="Training parameters" if index == 0 else "_nolegend_",
+        )
+    if len(visible):
+        ax.legend(loc="upper right", fontsize=9, framealpha=0.8)
 
 
 def local_maxima(values: np.ndarray) -> np.ndarray:
@@ -819,6 +1006,7 @@ def plot_single(
     point_size: float,
     alpha: float,
     dpi: int,
+    training_parameters: np.ndarray | None = None,
 ) -> None:
     fig, ax = plt.subplots(figsize=(16, 5.0), dpi=dpi)
     ax.scatter(points[0], points[1], s=point_size, c="black", alpha=alpha, linewidths=0)
@@ -826,6 +1014,8 @@ def plot_single(
         f"{label} - {regime.family} {regime.name}", fontsize=14, fontweight="semibold"
     )
     style_bifurcation_axis(ax, regime, parameter_values, component, show_ylabel=True)
+    if training_parameters is not None:
+        add_training_markers(ax, training_parameters, parameter_values)
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output)
@@ -843,6 +1033,7 @@ def plot_combined(
     point_size: float,
     alpha: float,
     dpi: int,
+    training_parameters: list[np.ndarray] | None = None,
 ) -> None:
     n_panels = 1 + len(model_points)
     fig, axes = plt.subplots(
@@ -858,7 +1049,7 @@ def plot_combined(
     labels = ["Ground Truth", *model_labels]
     points = [truth_points, *model_points]
 
-    for ax, label, point_pair in zip(axes_flat, labels, points):
+    for panel_index, (ax, label, point_pair) in enumerate(zip(axes_flat, labels, points)):
         ax.scatter(
             point_pair[0],
             point_pair[1],
@@ -871,6 +1062,8 @@ def plot_combined(
         style_bifurcation_axis(
             ax, regime, parameter_values, component, show_ylabel=True
         )
+        if panel_index > 0 and training_parameters is not None:
+            add_training_markers(ax, training_parameters[panel_index - 1], parameter_values)
 
     fig.suptitle(
         f"{regime.family}: {regime.name} bifurcation comparison",
@@ -895,6 +1088,7 @@ def write_plots(
     point_size: float,
     alpha: float,
     dpi: int,
+    training_parameters: list[np.ndarray] | None = None,
 ) -> list[Path]:
     written = []
     n_components = len(components)
@@ -912,12 +1106,13 @@ def write_plots(
             point_size=point_size,
             alpha=alpha,
             dpi=dpi,
+            training_parameters=training_parameters,
         )
         written.append(combined_output)
 
         all_labels = ["Ground Truth", *labels]
         all_points = [truth_points, *model_points]
-        for label, points in zip(all_labels, all_points):
+        for panel_index, (label, points) in enumerate(zip(all_labels, all_points)):
             single_output = individual_output_path(
                 output, component, label, n_components
             )
@@ -931,6 +1126,10 @@ def write_plots(
                 point_size=point_size,
                 alpha=alpha,
                 dpi=dpi,
+                training_parameters=(
+                    training_parameters[panel_index - 1]
+                    if panel_index > 0 and training_parameters is not None else None
+                ),
             )
             written.append(single_output)
     return written
@@ -966,6 +1165,8 @@ def main() -> None:
         raise ValueError(
             "--model-labels must have the same length as local runs plus pretrained models"
         )
+    if args.training_data_dirs is not None and len(args.training_data_dirs) != len(args.model_runs):
+        raise ValueError("--training-data-dirs must have one directory per --model-runs entry")
 
     regime = regime_by_name(args.regime)
     truth_steps = args.forecast_steps if args.truth_steps is None else args.truth_steps
@@ -978,6 +1179,7 @@ def main() -> None:
         f"pretrained:{name}" for name in args.pretrained_model_names
     ]
     labels = args.model_labels or default_labels
+    training_parameters = resolve_training_parameters(args, regime)
     cache_path = (
         args.cache if args.cache is not None else args.output.with_suffix(".npz")
     )
@@ -1002,6 +1204,7 @@ def main() -> None:
             point_size=args.point_size,
             alpha=args.alpha,
             dpi=args.dpi,
+            training_parameters=training_parameters,
         )
         for path in written:
             print(f"Saved plot: {path.resolve()}")
@@ -1155,6 +1358,7 @@ def main() -> None:
         point_size=args.point_size,
         alpha=args.alpha,
         dpi=args.dpi,
+        training_parameters=training_parameters,
     )
 
     for path in written:
