@@ -487,7 +487,7 @@ def add_training_markers(ax, values: np.ndarray, parameter_values: np.ndarray) -
     visible = values[(values >= low - 1e-7) & (values <= high + 1e-7)]
     for index, value in enumerate(visible):
         ax.axvline(
-            float(np.clip(value, low, high)), color="tab:blue", alpha=0.22,
+            float(np.clip(value, low, high)), color="tab:blue", alpha=0.4,
             linewidth=1.1, zorder=0,
             label="Training parameters" if index == 0 else "_nolegend_",
         )
